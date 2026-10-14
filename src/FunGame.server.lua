@@ -75,7 +75,7 @@ for i = 1, 40 do
 			local h = hit.Parent:FindFirstChildOfClass("Humanoid")
 			if h and h.WalkSpeed < 40 then
 				h.WalkSpeed = 40
-				task.delay(4, function() if h.Parent then h.WalkSpeed = 16 end end)
+				task.delay(4, function() if h.Parent then h.WalkSpeed = h:GetAttribute("BaseSpeed") or 16 end end)
 			end
 		end)
 	end
@@ -134,6 +134,7 @@ Players.PlayerAdded:Connect(function(plr)
 		-- Coins = speed bonus! every 200 coins gives +1 walkspeed (max +8)
 		local h = char:WaitForChild("Humanoid")
 		h.WalkSpeed = 16 + math.min(8, math.floor(ls.Coins.Value / 200))
+		h:SetAttribute("BaseSpeed", h.WalkSpeed)
 	end)
 end)
 
