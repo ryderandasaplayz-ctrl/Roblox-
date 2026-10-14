@@ -1,5 +1,6 @@
 <title>Wildwood Hunter</title>
 <meta name="claude:viewport-fit-sides" content="cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Barlow:wght@500;600;700;800&family=Barlow+Semi+Condensed:wght@600;700&display=swap">
 <style>
@@ -127,7 +128,7 @@ button{font:inherit;color:inherit}
 .hg-act.fire svg{width:36px;height:36px}
 .hg-act.aim{width:68px;height:68px}
 .hg-act.aim svg{width:30px;height:30px}
-#hg-actions-extra{position:absolute;right:var(--sr);top:calc(var(--st) + 64px);bottom:248px;display:flex;flex-direction:column;flex-wrap:wrap-reverse;align-content:flex-start;gap:10px;pointer-events:none}
+#hg-actions-extra{position:absolute;right:var(--sr);top:calc(var(--st) + 96px);bottom:calc(var(--sb) + 188px);display:flex;flex-direction:column;flex-wrap:wrap-reverse;align-content:flex-start;gap:10px;pointer-events:none}
 #hg-actions-extra .hg-act{position:relative}
 #hg-context{position:absolute;left:50%;bottom:calc(var(--sb) + 64px);transform:translateX(-50%);pointer-events:auto;z-index:3}
 #hg-context .hg-btn{min-height:52px;font-size:16px;border-radius:999px;padding:8px 22px 8px 14px}
@@ -151,16 +152,29 @@ button{font:inherit;color:inherit}
 #hg-rotate svg{width:28px;height:28px;color:var(--amber)}
 #hg-fps{position:absolute;right:calc(var(--sr) + 4px);bottom:2px;font:600 11px var(--num);color:var(--cream-2);opacity:.7;pointer-events:none;z-index:30}
 
+/* core arc buttons: positions come from CSS vars set by HG.ui.actionButton(..., {pos}) */
+.hg-act.arc{right:calc(var(--sr) + var(--r));bottom:calc(var(--sb) + var(--b))}
+.hg-weapon .wn{white-space:nowrap}
+
+/* short landscape phones: shrink the arc a little (targets stay >= 48px) and give feature buttons two rows */
+@media (orientation:landscape) and (max-height:430px){
+  #hg-actions{transform:scale(.87);transform-origin:100% 100%}
+  #hg-actions-extra{top:calc(var(--st) + 88px);bottom:calc(var(--sb) + 166px);gap:8px}
+  #hg-actions-extra .hg-act{width:48px;height:48px}
+  #hg-actions-extra .hg-act svg{width:21px;height:21px}
+}
 /* portrait adaptations */
 @media (orientation:portrait){
   .hg-act{width:52px;height:52px}
   .hg-act.fire{width:84px;height:84px}
-  #hg-actions-extra{bottom:262px}
-  #hg-slot-minimap{top:calc(var(--st) + 120px)}
-}
-@media (max-height:360px){
-  .hg-act{width:50px;height:50px}
-  .hg-act.fire{width:82px;height:82px}
+  .hg-act.aim{width:64px;height:64px}
+  .hg-act.arc{right:calc(var(--sr) + var(--rp));bottom:calc(var(--sb) + var(--bp))}
+  #hg-actions-extra{top:calc(var(--st) + 160px);bottom:calc(var(--sb) + 262px)}
+  #hg-slot-topCenter{top:calc(var(--st) + 60px)}
+  #hg-slot-minimap{top:calc(var(--st) + 112px)}
+  #hg-slot-bottomCenter{left:var(--sl);transform:none;bottom:calc(var(--sb) + 196px);align-items:flex-start}
+  #hg-context{bottom:calc(var(--sb) + 268px)}
+  #hg-rotate{top:calc(var(--st) + 112px);bottom:auto}
 }
 </style>
 

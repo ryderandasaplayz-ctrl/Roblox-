@@ -94,23 +94,22 @@
    * ------------------------------------------------------------------ */
   var listeners = {};
   /** HG.on(evt, fn) -> returns an off() function. Handlers run in registration order; {priority} sorts higher first. */
+  // listener arrays are copy-on-write, so emit() never allocates (safe to on/off inside handlers)
   HG.on = function (evt, fn, opts) {
     if (typeof fn !== 'function') return function () {};
-    var arr = listeners[evt] || (listeners[evt] = []);
     fn._hgPri = (opts && opts.priority) || 0;
-    arr.push(fn);
-    if (fn._hgPri) arr.sort(function (a, b) { return (b._hgPri || 0) - (a._hgPri || 0); });
+    var arr = (listeners[evt] || []).concat([fn]);
+    arr.sort(function (a, b) { return (b._hgPri || 0) - (a._hgPri || 0); });
+    listeners[evt] = arr;
     return function () { HG.off(evt, fn); };
   };
   HG.once = function (evt, fn) { var off = HG.on(evt, function () { off(); return fn.apply(this, arguments); }); return off; };
-  HG.off = function (evt, fn) { var arr = listeners[evt]; if (!arr) return; var i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); };
-  /** HG.emit(evt, ...args). Each handler is isolated with try/catch (errors are logged with console.error). */
-  HG.emit = function (evt) {
-    var arr = listeners[evt]; if (!arr || !arr.length) return;
-    var args = Array.prototype.slice.call(arguments, 1);
-    var list = arr.slice();
-    for (var i = 0; i < list.length; i++) {
-      try { list[i].apply(HG, args); } catch (e) { console.error('[HG] handler for "' + evt + '" failed:', e); }
+  HG.off = function (evt, fn) { var arr = listeners[evt]; if (!arr) return; listeners[evt] = arr.filter(function (f) { return f !== fn; }); };
+  /** HG.emit(evt, a1..a6). Up to 6 arguments. Each handler is isolated with try/catch (errors are logged with console.error). */
+  HG.emit = function (evt, a1, a2, a3, a4, a5, a6) {
+    var arr = listeners[evt]; if (!arr) return;
+    for (var i = 0; i < arr.length; i++) {
+      try { arr[i].call(HG, a1, a2, a3, a4, a5, a6); } catch (e) { console.error('[HG] handler for "' + evt + '" failed:', e); }
     }
   };
 
@@ -472,6 +471,7 @@
 
   HG.applyGraphics = function () {
     var low = HG.settings.graphics === 'low';
+    if (HG.booted && low !== HG.quality.low) HG._mapDirty = true; // vegetation density is decided at build time
     HG.quality.low = low;
     var pr = Math.min(window.devicePixelRatio || 1, low ? 1 : 1.5);
     renderer.setPixelRatio(pr);
@@ -698,7 +698,7 @@
   ui.root = rootEl;
   ui.hud = document.getElementById('hg-hud');
   var screensEl = document.getElementById('hg-screens');
-  var screens = {}, showHooks = {};
+  var screens = {}, showHooks = {}, rotateEl = null;
   ui.current = null;
   ui.previous = null;
   /** HG.ui.screen(id, html?) -> <section class="hg-screen" id="scr-ID">, hidden by default. Same id returns the same element (html replaces content if given). */
@@ -722,6 +722,7 @@
     if (!(opts && opts.keep)) for (var k in screens) if (k !== id && !screens[k].hidden) { screens[k].hidden = true; HG.emit('screenHide', k); }
     if (ui.current !== id) ui.previous = ui.current;
     ui.current = id;
+    if (rotateEl) rotateEl.hidden = true;
     (showHooks[id] || []).forEach(function (fn) { try { fn(el); } catch (e) { console.error('[HG] onShow ' + id, e); } });
     el.hidden = false;
     el.scrollTop = 0;
@@ -784,12 +785,20 @@
   };
   var bannerEl = document.getElementById('hg-banner'), bannerTimer = 0;
   /** HG.ui.banner(title, subtitle, {duration (s), color}) — big centred announcement */
+  var bannerQueue = [];
   ui.banner = function (title, subtitle, opts) {
     opts = opts || {};
+    // never cover an open trophy card: queue until it closes
+    if (!opts.force && HG.trophyPending && HG.trophyPending()) { bannerQueue.push([title, subtitle, opts]); return; }
     var dur = opts.duration || 2.8;
     bannerEl.innerHTML = '<div class="b-in" style="animation-duration:' + dur + 's"><h2' + (opts.color ? ' style="color:' + opts.color + '"' : '') + '>' + U.esc(title) + '</h2>' + (subtitle ? '<p>' + U.esc(subtitle) + '</p>' : '') + '</div>';
     clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(function () { bannerEl.innerHTML = ''; }, dur * 1000);
+    bannerTimer = setTimeout(function () { bannerEl.innerHTML = ''; ui.flushBanners(); }, dur * 1000);
+  };
+  /** show the next queued banner (called automatically when a trophy card closes) */
+  ui.flushBanners = function () {
+    if (!bannerQueue.length || (HG.trophyPending && HG.trophyPending())) return;
+    var b = bannerQueue.shift(); ui.banner(b[0], b[1], b[2]);
   };
   var slotNames = ['topLeft', 'topCenter', 'topRight', 'bottomCenter', 'left', 'minimap'];
   var slots = {};
@@ -852,7 +861,7 @@
   /** HG.ui.actionButton(id, label, svgIcon, onPress, opts) -> element
    *  opts: {hold:true (onPress on down, onRelease on up; HG.input.buttons[id] true while held),
    *         onRelease, toggle:true (adds/removes .on each press; onPress(isOn)), cls:'fire'|'aim'|...,
-   *         pos:{right, bottom} px from the bottom-right safe corner (core arc layout; omit to go into the extras column),
+   *         pos:{right, bottom, portrait:{right, bottom}} px from the bottom-right safe corner (core arc layout; omit to go into the extras column),
    *         order (extras column order), hidden:true, key:'KeyB' (desktop hint only)} */
   ui.actionButton = function (id, label, svgIcon, onPress, opts) {
     opts = opts || {};
@@ -891,8 +900,10 @@
     b.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     b._release = function () { if (held !== null) up({ pointerId: held }); };
     if (opts.pos) {
-      b.style.right = 'calc(var(--sr) + ' + opts.pos.right + 'px)';
-      b.style.bottom = 'calc(var(--sb) + ' + opts.pos.bottom + 'px)';
+      var pp = opts.pos.portrait || opts.pos;
+      b.classList.add('arc');
+      b.style.setProperty('--r', opts.pos.right + 'px'); b.style.setProperty('--b', opts.pos.bottom + 'px');
+      b.style.setProperty('--rp', pp.right + 'px'); b.style.setProperty('--bp', pp.bottom + 'px');
       actionsEl.appendChild(b);
     } else {
       b.style.order = opts.order || 0;
@@ -952,12 +963,15 @@
   var threatLevel = 0, threatAng = 0;
   /** Red edge indicator: relAngle = direction of the threat relative to view (0 ahead, +PI/2 left, -PI/2 right, PI behind); intensity 0..1. Decays automatically. */
   ui.threat = function (relAngle, intensity) { if (intensity >= threatLevel * 0.8) { threatAng = relAngle; } threatLevel = Math.max(threatLevel, intensity); };
+  var lastThreatK = -1, edgeOp = [-1, -1, -1, -1];
+  function setOp(el, i, v) { v = Math.round(v * 50) / 50; if (edgeOp[i] !== v) { edgeOp[i] = v; el.style.opacity = v; } }
   function updateThreat(dt) {
     threatLevel = Math.max(0, threatLevel - dt * 1.8);
     var k = threatLevel, a = threatAng;
     var left = Math.max(0, Math.sin(a)), right = Math.max(0, -Math.sin(a)), front = Math.max(0, Math.cos(a)), back = Math.max(0, -Math.cos(a));
-    edges.l.style.opacity = (k * left).toFixed(2); edges.r.style.opacity = (k * right).toFixed(2);
-    edges.t.style.opacity = (k * front * 0.8).toFixed(2); edges.b.style.opacity = (k * back).toFixed(2);
+    if (k === 0 && lastThreatK === 0) return;
+    lastThreatK = k;
+    setOp(edges.l, 0, k * left); setOp(edges.r, 1, k * right); setOp(edges.t, 2, k * front * 0.8); setOp(edges.b, 3, k * back);
   }
   var scopeEl = document.getElementById('hg-scope');
   scopeEl.innerHTML = '<svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice" viewBox="-50 -50 100 100" style="position:absolute;inset:0">' +
@@ -973,11 +987,12 @@
   ui.scopeEl = scopeEl;
 
   /* ---------- rotate hint ---------- */
-  var rotateEl = document.getElementById('hg-rotate'), rotateShown = false;
+  rotateEl = document.getElementById('hg-rotate');
+  var rotateShown = false;
   rotateEl.innerHTML = ui.icon('rotate') + '<span>Rotate your phone for the best view</span>';
   rotateEl.addEventListener('pointerdown', function (e) { e.stopPropagation(); rotateEl.hidden = true; });
   ui.rotateHint = function () {
-    if (rotateShown || !HG.portrait || !rootEl.classList.contains('touch')) return;
+    if (rotateShown || !HG.portrait || !rootEl.classList.contains('touch') || ui.current || HG.paused || HG.state !== 'hunt') return;
     rotateShown = true; rotateEl.hidden = false;
     setTimeout(function () { rotateEl.hidden = true; }, 5000);
   };
@@ -1612,6 +1627,7 @@
     var mx = input.move.x, my = input.move.y, mag = Math.min(1, Math.sqrt(mx * mx + my * my));
     if (player.frozen) { mx = my = mag = 0; }
     var aiming = HG.weapon && HG.weapon.aimT > 0.3;
+    if (input.sprintToggle && (player.stamina <= 0.02 || (input.isTouch && !input.joystick.active))) { input.sprintToggle = false; ui.setActionActive('sprint', false); }
     var wantSprint = input.sprint && my > 0.3 && !player.crouch && !aiming && player.stamina > 0.04;
     if (wantSprint && player.crouch) HG.setCrouch(false);
     player.sprint = wantSprint && mag > 0.2;
@@ -2093,7 +2109,8 @@
       var a = HG.animals[i];
       var dx = player.pos.x - a.pos.x, dz = player.pos.z - a.pos.z;
       a.distToPlayer = Math.sqrt(dx * dx + dz * dz);
-      a.root.visible = U.dist2D(cam.x, cam.z, a.pos.x, a.pos.z) < far;
+      var camD = U.dist2D(cam.x, cam.z, a.pos.x, a.pos.z);
+      a.root.visible = camD < far;
       if (a.dead) { updateDead(a, dt); continue; }
       a.stateTime += dt;
       if (a._pendingAlert) { var pa = a._pendingAlert; pa.t -= dt; if (pa.t <= 0) { a._pendingAlert = null; _v6.set(pa.x, pa.y, pa.z); HG.alertAnimal(a, _v6, pa.s, pa.c); } }
@@ -2103,7 +2120,7 @@
       if (a.def.update) { try { override = a.def.update(a, dt) === true; } catch (e) { console.error('[HG] animal update ' + a.type, e); } }
       if (a.removed) continue;
       if (!override) { updateAnimalAI(a, dt); moveAnimal(a, dt); }
-      if (a.root.visible && (a.distToPlayer < 140 || (HG.frame + a.id) % 3 === 0)) animateAnimal(a, dt);
+      if (a.root.visible && (camD < 140 || (HG.frame + a.id) % 3 === 0)) animateAnimal(a, (camD < 140 ? 1 : 3) * dt);
       if (a.wounded && a.speed > 0.3) {
         a.dotDist += a.speed * dt;
         if (a.dotDist > 1.6) { a.dotDist = 0; HG.addTrackDot(a.pos.x + (Math.random() - 0.5) * 0.4, a.pos.z + (Math.random() - 0.5) * 0.4); }
@@ -2598,9 +2615,10 @@
   };
   /** Default kill-cam: no-op. weapons.js may replace: HG.killCam = function(animal, info){ ...; return promiseOrUndefined; } */
   HG.killCam = function (animal, info) { };
-  var trophyQueue = [], trophyOpen = false;
+  var trophyQueue = [], trophyOpen = false, cardsPending = 0;
   function killAnimal(a, zone, info) {
     var def = a.def, rar = HG.RARITY[def.rarity] || HG.RARITY.common;
+    cardsPending++;
     a.dead = true; a.alive = false; a.state = 'dead'; a.deadT = 0; a.speed = 0; a.moveSpeed = 0;
     a.tipDir = Math.random() < 0.5 ? 1 : -1;
     var dist = Math.round((info.distance || a.distToPlayer) * 10) / 10;
@@ -2648,7 +2666,7 @@
   }
   HG.killAnimal = function (a, zone) { if (a && !a.dead) killAnimal(a, zone || 'vital', { distance: a.distToPlayer, weapon: W.id }); };
   function queueTrophy(a, info) {
-    if (HG.state !== 'hunt') { HG.fadeAnimal(a); return; }
+    if (HG.state !== 'hunt') { cardsPending = Math.max(0, cardsPending - 1); HG.fadeAnimal(a); ui.flushBanners(); return; }
     trophyQueue.push({ a: a, info: info });
     if (!trophyOpen) nextTrophy();
   }
@@ -2660,13 +2678,16 @@
     HG.showTrophyCard(t.a, t.info, function () {
       HG.fadeAnimal(t.a);
       trophyOpen = false;
+      cardsPending = Math.max(0, cardsPending - 1);
       nextTrophy();
+      setTimeout(ui.flushBanners, 250);
     });
   }
-  HG.trophyPending = function () { return trophyOpen || trophyQueue.length > 0; };
+  HG.trophyPending = function () { return trophyOpen || trophyQueue.length > 0 || cardsPending > 0; };
 
   // ---- per-frame weapon update: aim, FOV, spread, recoil, view-model pose ----
   var hipPos = new THREE.Vector3(), aimPos = new THREE.Vector3(), vmPos = new THREE.Vector3();
+  var DEF_HIP = [0.2, -0.215, -0.5], DEF_AIM = [0, -0.06, -0.3];
   var lastFov = 0, lastLookYaw = 0, lastLookPitch = 0;
   function updateWeapon(dt, rdt) {
     if (!W.def) return;
@@ -2719,7 +2740,7 @@
     aimAssist.target = null;
     if (HG.settings.aimAssist && input.isTouch && canAct) findAssist();
     // view model pose
-    var hp = def.hipPos || [0.17, -0.2, -0.42], ap = def.aimPos || [0, -0.06, -0.3];
+    var hp = def.hipPos || DEF_HIP, ap = def.aimPos || DEF_AIM;
     hipPos.set(hp[0], hp[1], hp[2]); aimPos.set(ap[0], ap[1], ap[2]);
     vmPos.copy(hipPos).lerp(aimPos, W.aimT);
     var bk = (1 - W.aimT * 0.85) * U.clamp(player.speed / player.walkSpeed, 0, 1.6);
@@ -2757,6 +2778,7 @@
       }
     } else flashMesh.visible = false;
   }
+  var assistBest = { a: null, err: 0, yaw: 0, pitch: 0 };
   function findAssist() {
     var best = null, bestErr = (W.aimT > 0.5 ? 2.2 : 4.5) * DEG * (HG.camera.fov / 70), range = wstat('range', 250);
     var cam = HG.camera.position;
@@ -2772,7 +2794,7 @@
       var d = _v2.length(); _v2.multiplyScalar(1 / d);
       var err = Math.acos(U.clamp(_v2.dot(_v1), -1, 1));
       var tol = bestErr + Math.atan(z.radius * a.scale / d);
-      if (err < tol && err < (best ? best.err : 1e9)) best = { a: a, err: err, yaw: Math.atan2(-_v2.x, -_v2.z), pitch: Math.asin(U.clamp(_v2.y, -1, 1)) };
+      if (err < tol && err < (best ? best.err : 1e9)) { best = assistBest; best.a = a; best.err = err; best.yaw = Math.atan2(-_v2.x, -_v2.z); best.pitch = Math.asin(U.clamp(_v2.y, -1, 1)); }
     }
     if (best) { aimAssist.target = best.a; aimAssist.yaw = best.yaw; aimAssist.pitch = best.pitch - player.recoilPitch; aimAssist.err = best.err; }
   }
@@ -2798,7 +2820,8 @@
     '.hg-iconbtn{width:48px;height:48px;border-radius:14px;border:1.5px solid var(--panel-line);background:rgba(10,20,15,.66);color:var(--cream);display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}' +
     '.hg-iconbtn svg{width:22px;height:22px}' +
     '#hg-compass{display:block;width:300px;height:38px;border-radius:12px;background:linear-gradient(180deg,rgba(10,20,15,.72),rgba(10,20,15,.5));border:1.5px solid var(--panel-line)}' +
-    '.portrait #hg-compass{width:190px}' +
+    '.portrait #hg-compass{width:180px}' +
+    '.portrait .hg-meters{flex-direction:column;align-items:flex-end}' +
     '.hg-meters{display:flex;gap:6px}' +
     '.hg-meter{display:flex;align-items:center;gap:5px;padding:4px 8px;border-radius:10px;background:rgba(10,20,15,.66);border:1.5px solid var(--panel-line);font:700 12px var(--num);color:var(--cream-2)}' +
     '.hg-meter svg{width:16px;height:16px}' +
@@ -2837,12 +2860,12 @@
     wpn.innerHTML = '<div><div class="wn"></div><div class="hg-reloadbar"></div></div><div class="am"></div>';
     bc.appendChild(wpn); hud.wn = wpn.querySelector('.wn'); hud.am = wpn.querySelector('.am'); hud.rb = wpn.querySelector('.hg-reloadbar');
     // mobile action cluster (arc around FIRE)
-    ui.actionButton('fire', 'Fire', 'fire', function () { input.fire = true; input.firePressed = true; }, { hold: true, cls: 'fire', pos: { right: 14, bottom: 18 }, onRelease: function () { input.fire = false; } });
-    ui.actionButton('aim', 'Aim', 'aim', function (on) { input.aim = on; input.aimToggle = on; }, { toggle: true, cls: 'aim', pos: { right: 118, bottom: 22 } });
-    ui.actionButton('reload', 'Reload', 'reload', function () { HG.reload(); }, { pos: { right: 30, bottom: 124 } });
-    ui.actionButton('weapon', 'Swap', 'swap', function () { HG.cycleWeapon(1); }, { pos: { right: 98, bottom: 106 } });
-    ui.actionButton('crouch', 'Crouch', 'crouch', function () { HG.setCrouch(!player.crouch); }, { pos: { right: 200, bottom: 16 } });
-    ui.actionButton('sprint', 'Sprint', 'sprint', function (on) { input.sprintToggle = on; if (on && player.crouch) HG.setCrouch(false); }, { toggle: true, pos: { right: 172, bottom: 88 } });
+    ui.actionButton('fire', 'Fire', 'fire', function () { input.fire = true; input.firePressed = true; }, { hold: true, cls: 'fire', pos: { right: 14, bottom: 18, portrait: { right: 12, bottom: 20 } }, onRelease: function () { input.fire = false; } });
+    ui.actionButton('aim', 'Aim', 'aim', function (on) { input.aim = on; input.aimToggle = on; }, { toggle: true, cls: 'aim', pos: { right: 118, bottom: 22, portrait: { right: 22, bottom: 116 } } });
+    ui.actionButton('reload', 'Reload', 'reload', function () { HG.reload(); }, { pos: { right: 30, bottom: 124, portrait: { right: 106, bottom: 26 } } });
+    ui.actionButton('weapon', 'Swap', 'swap', function () { HG.cycleWeapon(1); }, { pos: { right: 98, bottom: 106, portrait: { right: 100, bottom: 92 } } });
+    ui.actionButton('crouch', 'Crouch', 'crouch', function () { HG.setCrouch(!player.crouch); }, { pos: { right: 200, bottom: 16, portrait: { right: 28, bottom: 192 } } });
+    ui.actionButton('sprint', 'Sprint', 'sprint', function (on) { input.sprintToggle = on; if (on && player.crouch) HG.setCrouch(false); }, { toggle: true, pos: { right: 172, bottom: 88, portrait: { right: 94, bottom: 158 } } });
   }
   var hudT = 0, compassT = 0, lastHud = {};
   function setText(el, key, v) { if (lastHud[key] !== v) { lastHud[key] = v; el.textContent = v; } }
@@ -2875,6 +2898,13 @@
     ui.setActionVisible('weapon', HG.getLoadout().length > 1);
     if (HG.fpsEl) HG.fpsEl.textContent = HG.fps + ' fps';
   }
+  var cmp = { ctx: null, bearing: 0, span: 150, w: 300, h: 38, ppd: 2 };
+  function mark(bDeg, color, size) {
+    var d = ((bDeg - cmp.bearing + 540) % 360) - 180;
+    if (Math.abs(d) > cmp.span / 2) { d = d > 0 ? cmp.span / 2 - 2 : -cmp.span / 2 + 2; size *= 0.7; } // clamp to edges as a hint
+    var x = cmp.w / 2 + d * cmp.ppd, ctx = cmp.ctx;
+    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, cmp.h - 6, size, 0, TAU); ctx.fill();
+  }
   var COMPASS_LABELS = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SW', 270: 'W', 315: 'NW' };
   function drawCompass() {
     var cv = hud.compass; if (!cv) return;
@@ -2902,14 +2932,7 @@
     }
     ctx.globalAlpha = 1;
     // markers: alerted / fleeing / charging animals (within 200 m) + feature markers
-    function mark(bDeg, color, size) {
-      var d = ((bDeg - bearing + 540) % 360) - 180;
-      if (Math.abs(d) > span / 2) { // clamp to edges as hint
-        d = d > 0 ? span / 2 - 2 : -span / 2 + 2; size *= 0.7;
-      }
-      var x = w / 2 + d * ppd;
-      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, h - 6, size, 0, TAU); ctx.fill();
-    }
+    cmp.ctx = ctx; cmp.bearing = bearing; cmp.span = span; cmp.w = w; cmp.h = h; cmp.ppd = ppd;
     for (var i = 0; i < HG.animals.length; i++) {
       var a = HG.animals[i];
       if (a.dead || a.distToPlayer > 200) continue;
@@ -3159,6 +3182,24 @@
     '.hg-keys{font:600 12.5px var(--num);color:var(--cream-2);line-height:1.6;letter-spacing:.03em}' +
     '#hg-root.touch .hg-keys{display:none}'
   );
+  // compact layouts for short landscape phones (e.g. 640x360, 844x390) and narrow portrait
+  ui.css(
+    '@media (orientation:landscape) and (max-height:500px){' +
+    '.hg-trophy{max-width:700px;display:grid;grid-template-columns:40% 60%;grid-template-rows:auto auto auto 1fr}' +
+    '.hg-trophy .top{grid-column:1;grid-row:1 / span 4;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px}' +
+    '.hg-trophy .facts,.hg-trophy .rew,.hg-trophy .bon,.hg-trophy .act{grid-column:2}' +
+    '.hg-trophy .act{align-self:end;padding:0 14px 14px}.hg-trophy .rew{padding:10px}' +
+    '.hg-trophy .facts div{padding:7px 4px}' +
+    '}' +
+    '@media (max-height:430px){' +
+    '.hg-card{padding:10px;gap:4px}.hg-card .ic{height:48px}.hg-card .ic canvas{width:90px!important;height:48px!important}' +
+    '.hg-mapcard canvas{height:78px!important}' +
+    '.hg-screen-head{margin:0 0 6px}.hg-tabs{padding-bottom:6px;margin-bottom:2px}' +
+    '.hg-sum{padding:8px}' +
+    '}' +
+    '#hg-root.card-open .hg-toast.big,#hg-root.card-open #hg-banner{display:none}' +
+    '@media (max-width:480px){.hg-killrow{flex-wrap:wrap;row-gap:2px}.hg-killrow b{flex-basis:70%}.hg-killrow span{font-size:13px}}'
+  );
   // ---- main menu ----
   var menuEl = ui.screen('menu',
     '<div class="hg-menu"><div class="hg-menu-left"><div class="hg-logo"><div class="mark">' + ui.icon('antlers') + '</div>' +
@@ -3305,6 +3346,7 @@
     var done = false;
     var btn = ui.button('Continue', function () {
       if (done) return; done = true;
+      rootEl.classList.remove('card-open');
       ui.hide('trophy'); HG.resume('trophy');
       onContinue && onContinue();
       HG.emit('trophyClosed', a, info);
@@ -3313,6 +3355,7 @@
     el.querySelector('.act').appendChild(btn);
     HG.exitPointerLock();
     HG.pause('trophy');
+    rootEl.classList.add('card-open');
     ui.show('trophy');
     HG.sfx('trophy');
     HG.emit('trophyCard', a, info, el);
@@ -3469,7 +3512,7 @@
     if (!HG.isMapUnlocked(mapId)) { ui.toast(map.name + ' is locked', { color: 'var(--danger)' }); return null; }
     ui.hideAll();
     HG.music.stop();
-    trophyQueue.length = 0; trophyOpen = false;
+    trophyQueue.length = 0; trophyOpen = false; cardsPending = 0;
     for (var k in pauseReasons) delete pauseReasons[k];
     HG.paused = false; HG.timeScale = 1;
     if (HG.mapId !== mapId || HG._mapDirty) { HG.loadMap(mapId); HG._mapDirty = false; }
@@ -3517,11 +3560,12 @@
     // unspent rounds go back into the reserve
     for (var id in HG.weaponState) { var def = HG.weaponTypes[id]; if (def && HG.weaponState[id].mag > 0) { HG.save.ammo[def.ammo] = (HG.save.ammo[def.ammo] || 0) + HG.weaponState[id].mag; HG.weaponState[id].mag = 0; } }
     HG.weaponState = {};
-    trophyQueue.length = 0; trophyOpen = false;
+    trophyQueue.length = 0; trophyOpen = false; cardsPending = 0;
+    setTimeout(ui.flushBanners, 400);
     for (var k in pauseReasons) delete pauseReasons[k];
     HG.paused = false; HG.timeScale = 1;
     HG.exitPointerLock(); HG.resetInput();
-    ui.clearContext(); ui.setScope(false);
+    ui.clearContext(); ui.setScope(false); rootEl.classList.remove('card-open');
     player.inVehicle = null; player.onStand = null; player.fovOverride = null;
     HG.state = 'summary';
     rootEl.classList.remove('in-hunt');
@@ -3592,6 +3636,7 @@
     try {
       if (!HG.paused) {
         HG.time += dt;
+        if (HG.state === 'hunt') HG.save.stats.playTime += rdt;
         pollInput();
         HG.emit('preUpdate', dt);
         if (HG.state === 'hunt') updatePlayer(dt); else updateMenuCamera(rdt);
