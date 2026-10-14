@@ -139,6 +139,16 @@
   HG.SAVE_VERSION = 1;
   HG.storageOK = true;
   var saveDefaultsExtra = {};
+  /** first-run graphics level: Low on small touch screens or low-memory devices, High otherwise */
+  function autoQuality(touch) {
+    try {
+      var mem = navigator.deviceMemory || 0, minDim = Math.min(screen.width || 9999, screen.height || 9999);
+      if (mem && mem <= 3) return 'low';
+      if (touch && minDim < 600) return 'low';
+    } catch (e) {}
+    return 'high';
+  }
+  HG.autoQuality = autoQuality;
   function defaultSave() {
     var touch = U.isTouchDevice();
     return {
@@ -153,7 +163,7 @@
         bySpecies: {}, distanceWalked: 0, playTime: 0, cashEarned: 0, timesDowned: 0, legendaryKills: 0
       },
       settings: {
-        sens: 1, invertY: false, graphics: touch ? 'low' : 'high', sound: true, music: true,
+        sens: 1, invertY: false, graphics: autoQuality(touch), sound: true, music: true,
         aimAssist: touch, fov: 70, showFps: false, vibrate: true
       },
       unlockedMaps: ['pine_valley'],
@@ -348,18 +358,30 @@
   /* ------------------------------------------------------------------
    * Model helpers (low-poly, flat-shaded, vertex-coloured, mergeable)
    * ------------------------------------------------------------------ */
-  /** Shared vertex-colour material for merged props/animals (never dispose it). */
-  HG.vcMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  HG.vcMat.userData.shared = true;
+  /** Shared vertex-colour material for merged props (never dispose it). Quality aware: Standard on High/Ultra, Lambert on Low
+   *  (HG.vcMat is a getter, so read it when you build). Vertex colours from HG.model are linearised automatically. */
+  var vcMats = {};
+  Object.defineProperty(HG, 'vcMat', { configurable: true, get: function () {
+    var low = !!(HG.quality && HG.quality.low), k = low ? 'L' : 'H';
+    if (!vcMats[k]) { vcMats[k] = low ? new THREE.MeshLambertMaterial({ vertexColors: true }) : new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.86, metalness: 0 }); vcMats[k].userData.shared = true; }
+    return vcMats[k];
+  } });
   var matCache = {};
-  /** HG.mat(color, opts) -> cached shared MeshLambertMaterial (opts: {emissive, transparent, opacity, side, basic:true for MeshBasicMaterial}) */
+  /** HG.mat(color, opts) -> cached shared material (Standard on High/Ultra, Lambert on Low). color is sRGB.
+   *  opts: {emissive, transparent, opacity, side, roughness, metalness, basic:true for MeshBasicMaterial} */
   HG.mat = function (color, opts) {
-    var key = String(color) + (opts ? JSON.stringify(opts) : '');
+    var low = !!(HG.quality && HG.quality.low);
+    var key = String(color) + (opts ? JSON.stringify(opts) : '') + (low ? 'L' : 'H');
     if (matCache[key]) return matCache[key];
-    var o = { color: new THREE.Color(color) };
+    var o = { color: new THREE.Color(color).convertSRGBToLinear() };
     var basic = false;
-    if (opts) for (var k in opts) { if (k === 'basic') { basic = true; continue; } o[k] = (k === 'emissive') ? new THREE.Color(opts[k]) : opts[k]; }
-    var m = basic ? new THREE.MeshBasicMaterial(o) : new THREE.MeshLambertMaterial(o);
+    if (opts) for (var k in opts) {
+      if (k === 'basic') { basic = true; continue; }
+      if ((k === 'roughness' || k === 'metalness') && (low || opts.basic)) continue;
+      o[k] = (k === 'emissive') ? new THREE.Color(opts[k]).convertSRGBToLinear() : opts[k];
+    }
+    if (!basic && !low) { if (o.roughness == null) o.roughness = 0.85; if (o.metalness == null) o.metalness = 0; }
+    var m = basic ? new THREE.MeshBasicMaterial(o) : low ? new THREE.MeshLambertMaterial(o) : new THREE.MeshStandardMaterial(o);
     m.userData.shared = true;
     return (matCache[key] = m);
   };
@@ -383,7 +405,7 @@
   /** (Re)colour a non-indexed geometry: one colour, optional per-triangle brightness jitter. */
   M.colorize = function (g, color, jitter, rng) {
     var n = g.attributes.position.count, arr = new Float32Array(n * 3);
-    _c1.set(color == null ? 0xffffff : color);
+    _c1.set(color == null ? 0xffffff : color).convertSRGBToLinear();
     rng = rng || Math.random;
     for (var i = 0; i < n; i += 3) {
       var j = jitter ? 1 + (rng() - 0.5) * 2 * jitter : 1;
@@ -431,12 +453,2452 @@
     g.applyMatrix4(_obj.matrix); return g;
   };
 
+  /* ==================================================================
+   * HG.gfx — rendering + model toolkit (see API.md §6b)
+   *   textures (procedural canvas, cached), materials (quality aware),
+   *   organic geometry (loft / organicBody / limbs / antlers / horns ...),
+   *   vertex paint + AO, LOD, skinned rigs with gaits.
+   * Colours passed to HG.gfx are sRGB (CSS/hex) and converted to linear.
+   * ================================================================== */
+  var G = HG.gfx = {};
+  var SRGB = THREE.sRGBEncoding;
+  /** sRGB hex/CSS colour -> NEW linear THREE.Color */
+  G.color = function (c) { return new THREE.Color(c).convertSRGBToLinear(); };
+  G.level = function () { return HG.quality ? (HG.quality.level || (HG.quality.low ? 'low' : 'high')) : 'high'; };
+  G.isLow = function () { return !!(HG.quality && HG.quality.low); };
+
+  /* ---------------- noise (CPU) ---------------- */
+  function hash2(ix, iy, seed) {
+    var h = Math.imul(ix | 0, 374761393) ^ Math.imul(iy | 0, 668265263) ^ Math.imul((seed | 0) + 1013, 2246822519);
+    h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
+  }
+  function hash3(ix, iy, iz, seed) {
+    var h = Math.imul(ix | 0, 374761393) ^ Math.imul(iy | 0, 668265263) ^ Math.imul(iz | 0, 1440662683) ^ Math.imul((seed | 0) + 77, 2246822519);
+    h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
+  }
+  function sstep(t) { return t * t * (3 - 2 * t); }
+  /** tileable 2D value noise with integer period p (lattice cells per tile) */
+  function vnoise(x, y, p, seed) {
+    var ix = Math.floor(x), iy = Math.floor(y), fx = sstep(x - ix), fy = sstep(y - iy);
+    var x0 = ((ix % p) + p) % p, y0 = ((iy % p) + p) % p, x1 = (x0 + 1) % p, y1 = (y0 + 1) % p;
+    var a = hash2(x0, y0, seed), b = hash2(x1, y0, seed), c = hash2(x0, y1, seed), d = hash2(x1, y1, seed);
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+  }
+  /** tileable fbm on the unit tile (u,v in 0..1) */
+  function fbm(u, v, p, oct, seed) {
+    var s = 0, amp = 0.5, tot = 0;
+    for (var o = 0; o < oct; o++) { s += amp * vnoise(u * p, v * p, p, seed + o * 31); tot += amp; amp *= 0.5; p *= 2; }
+    return s / tot;
+  }
+  /** smooth 3D value noise (not tiled), ~0..1 */
+  function vnoise3(x, y, z, seed) {
+    var ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z), fx = sstep(x - ix), fy = sstep(y - iy), fz = sstep(z - iz);
+    var a = hash3(ix, iy, iz, seed), b = hash3(ix + 1, iy, iz, seed), c = hash3(ix, iy + 1, iz, seed), d = hash3(ix + 1, iy + 1, iz, seed);
+    var e = hash3(ix, iy, iz + 1, seed), f = hash3(ix + 1, iy, iz + 1, seed), g = hash3(ix, iy + 1, iz + 1, seed), h = hash3(ix + 1, iy + 1, iz + 1, seed);
+    var l0 = a + (b - a) * fx, l1 = c + (d - c) * fx, l2 = e + (f - e) * fx, l3 = g + (h - g) * fx;
+    var m0 = l0 + (l1 - l0) * fy, m1 = l2 + (l3 - l2) * fy;
+    return m0 + (m1 - m0) * fz;
+  }
+  function fbm3(x, y, z, oct, seed) { var s = 0, amp = 0.5, tot = 0; for (var o = 0; o < oct; o++) { s += amp * vnoise3(x, y, z, seed + o * 17); tot += amp; amp *= 0.5; x *= 2.03; y *= 2.03; z *= 2.03; } return s / tot; }
+  G.noise = { hash2: hash2, hash3: hash3, value2: vnoise, fbm2: fbm, value3: vnoise3, fbm3: fbm3 };
+
+  /* ---------------- textures ---------------- */
+  var texCache = {};
+  function mkCanvas(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h || w; return c; }
+  G.canvas = mkCanvas;
+  function maxAniso() { try { return Math.max(1, Math.min(G.isLow() ? 2 : 8, renderer.capabilities.getMaxAnisotropy() || 1)); } catch (e) { return 1; } }
+  function texSize(n) { var l = G.level(); return l === 'low' ? Math.max(64, n >> 1) : l === 'ultra' ? Math.min(2048, n * 2) : n; }
+  G.texSize = texSize;
+  function finishTex(t, o) {
+    o = o || {};
+    if (!t.userData) t.userData = {};
+    t.wrapS = t.wrapT = o.clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+    if (o.srgb !== false) t.encoding = SRGB;
+    t.anisotropy = o.aniso || maxAniso();
+    if (o.repeat) t.repeat.set(o.repeat[0], o.repeat[1]);
+    t.userData.shared = true;
+    t.needsUpdate = true;
+    return t;
+  }
+  /** cached(key, makeFn) -> value (textures, canvases, geometries shared across the game) */
+  function cached(key, fn) { if (texCache[key]) return texCache[key]; var v = fn(); texCache[key] = v; return v; }
+  G.cached = cached;
+  /** G.texture(key, w, h, draw(ctx, w, h, rng), {srgb, repeat, clamp}) -> cached CanvasTexture */
+  G.texture = function (key, w, h, draw, o) {
+    return cached('tx:' + key + ':' + w + 'x' + h, function () {
+      var c = mkCanvas(w, h), ctx = c.getContext('2d');
+      try { draw(ctx, w, h, U.rng(hashStrG(key))); } catch (e) { console.error('[HG.gfx] texture ' + key, e); }
+      return finishTex(new THREE.CanvasTexture(c), o);
+    });
+  };
+  function hashStrG(s) { var h = 2166136261; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+  G.hashStr = hashStrG;
+  /** grayscale tileable fbm canvas (cached) */
+  function noiseCanvas(size, period, oct, seed) {
+    return cached('nc:' + size + ':' + period + ':' + oct + ':' + seed, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), img = ctx.createImageData(size, size), d = img.data;
+      for (var y = 0; y < size; y++) for (var x = 0; x < size; x++) {
+        var v = fbm(x / size, y / size, period, oct, seed) * 255, i = (y * size + x) * 4;
+        d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0); return c;
+    });
+  }
+  G.noiseCanvas = noiseCanvas;
+  /** overlay tileable noise on a canvas region: amp 0..1 (soft-light) */
+  function noiseOverlay(ctx, w, h, period, oct, amp, seed, mode) {
+    var n = noiseCanvas(Math.min(512, Math.max(w, h)), period, oct, seed);
+    ctx.save(); ctx.globalAlpha = amp; ctx.globalCompositeOperation = mode || 'overlay';
+    ctx.drawImage(n, 0, 0, w, h); ctx.restore();
+  }
+  /** draw fn(x, y) at (x, y) and its wrapped copies so the tile stays seamless */
+  function wrapDraw(w, h, x, y, r, fn) {
+    fn(x, y);
+    var ox = x < r ? w : x > w - r ? -w : 0, oy = y < r ? h : y > h - r ? -h : 0;
+    if (ox) fn(x + ox, y); if (oy) fn(x, y + oy); if (ox && oy) fn(x + ox, y + oy);
+  }
+  G.wrapDraw = wrapDraw;
+  function rgba(c, a) { var col = new THREE.Color(c); return 'rgba(' + Math.round(col.r * 255) + ',' + Math.round(col.g * 255) + ',' + Math.round(col.b * 255) + ',' + a + ')'; }
+  function shade(c, k) { var col = new THREE.Color(c); col.r = Math.min(1, col.r * k); col.g = Math.min(1, col.g * k); col.b = Math.min(1, col.b * k); return '#' + col.getHexString(); }
+  function mixHex(a, b, t) { var A = new THREE.Color(a), B = new THREE.Color(b); return '#' + A.lerp(B, t).getHexString(); }
+  G.css = { rgba: rgba, shade: shade, mix: mixHex };
+
+  /** height (luminance) canvas -> tangent-space normal map canvas (tileable) */
+  G.normalFromCanvas = function (src, strength, invert) {
+    var w = src.width, h = src.height, sd = src.getContext('2d').getImageData(0, 0, w, h).data;
+    var c = mkCanvas(w, h), ctx = c.getContext('2d'), img = ctx.createImageData(w, h), d = img.data, s = (strength || 2) * (invert ? -1 : 1);
+    function L(x, y) { x = (x + w) % w; y = (y + h) % h; var i = (y * w + x) * 4; return (sd[i] * 0.3 + sd[i + 1] * 0.59 + sd[i + 2] * 0.11) / 255; }
+    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+      var nx = (L(x - 1, y) - L(x + 1, y)) * s, ny = (L(x, y + 1) - L(x, y - 1)) * s, nz = 1, l = Math.sqrt(nx * nx + ny * ny + 1), i = (y * w + x) * 4;
+      d[i] = (nx / l * 0.5 + 0.5) * 255; d[i + 1] = (ny / l * 0.5 + 0.5) * 255; d[i + 2] = (nz / l * 0.5 + 0.5) * 255; d[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0); return c;
+  };
+  function normalTex(key, canvas, strength) {
+    return cached('nm:' + key + ':' + canvas.width, function () { return finishTex(new THREE.CanvasTexture(G.normalFromCanvas(canvas, strength)), { srgb: false }); });
+  }
+  G.normalTexture = normalTex;
+
+  /** Alpha-tested foliage/feather textures: canvas -> DataTexture with colour dilation (no dark fringes)
+   *  and coverage-preserving mip levels (leaves do not vanish at distance). */
+  G.alphaTexture = function (key, canvas, o) {
+    return cached('at:' + key + ':' + canvas.width, function () {
+      o = o || {};
+      var w = canvas.width, h = canvas.height, src = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+      var d0 = new Uint8Array(src.length); d0.set(src);
+      // dilate rgb into transparent texels (4 passes), then fill the rest with the average opaque colour
+      var ar = 0, ag = 0, ab = 0, an = 0, i, x, y;
+      for (i = 0; i < d0.length; i += 4) if (d0[i + 3] > 128) { ar += d0[i]; ag += d0[i + 1]; ab += d0[i + 2]; an++; }
+      if (an) { ar /= an; ag /= an; ab /= an; }
+      var filled = new Uint8Array(w * h); for (i = 0; i < w * h; i++) filled[i] = d0[i * 4 + 3] > 20 ? 1 : 0;
+      for (var pass = 0; pass < 6; pass++) {
+        var nf = filled.slice();
+        for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+          var k = y * w + x; if (filled[k]) continue;
+          var r = 0, g = 0, b = 0, c = 0;
+          for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+            var xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+            var kk = yy * w + xx; if (!filled[kk]) continue; r += d0[kk * 4]; g += d0[kk * 4 + 1]; b += d0[kk * 4 + 2]; c++;
+          }
+          if (c) { d0[k * 4] = r / c; d0[k * 4 + 1] = g / c; d0[k * 4 + 2] = b / c; nf[k] = 1; }
+        }
+        filled = nf;
+      }
+      for (i = 0; i < w * h; i++) if (!filled[i]) { d0[i * 4] = ar; d0[i * 4 + 1] = ag; d0[i * 4 + 2] = ab; }
+      var mips = [{ data: d0, width: w, height: h }], cw = w, ch = h, prev = d0, lvl = 0;
+      while (cw > 1 || ch > 1) {
+        var nw = Math.max(1, cw >> 1), nh = Math.max(1, ch >> 1), nd = new Uint8Array(nw * nh * 4); lvl++;
+        var boost = 1 + 0.32 * lvl;
+        for (y = 0; y < nh; y++) for (x = 0; x < nw; x++) {
+          var x0 = Math.min(cw - 1, x * 2), y0 = Math.min(ch - 1, y * 2), x1 = Math.min(cw - 1, x0 + 1), y1 = Math.min(ch - 1, y0 + 1);
+          var o0 = (y0 * cw + x0) * 4, o1 = (y0 * cw + x1) * 4, o2 = (y1 * cw + x0) * 4, o3 = (y1 * cw + x1) * 4, q = (y * nw + x) * 4;
+          for (var cc = 0; cc < 3; cc++) nd[q + cc] = (prev[o0 + cc] + prev[o1 + cc] + prev[o2 + cc] + prev[o3 + cc]) >> 2;
+          var a = (prev[o0 + 3] + prev[o1 + 3] + prev[o2 + 3] + prev[o3 + 3]) / 4;
+          nd[q + 3] = o.noBoost ? a : Math.min(255, a * (a > 40 ? boost : 1));
+        }
+        // boost is applied on the averaged (un-boosted) chain to avoid compounding
+        mips.push({ data: nd, width: nw, height: nh });
+        var plain = new Uint8Array(nd.length);
+        for (i = 0; i < nd.length; i += 4) { plain[i] = nd[i]; plain[i + 1] = nd[i + 1]; plain[i + 2] = nd[i + 2]; }
+        for (y = 0; y < nh; y++) for (x = 0; x < nw; x++) {
+          var x0b = Math.min(cw - 1, x * 2), y0b = Math.min(ch - 1, y * 2), x1b = Math.min(cw - 1, x0b + 1), y1b = Math.min(ch - 1, y0b + 1);
+          plain[(y * nw + x) * 4 + 3] = (prev[(y0b * cw + x0b) * 4 + 3] + prev[(y0b * cw + x1b) * 4 + 3] + prev[(y1b * cw + x0b) * 4 + 3] + prev[(y1b * cw + x1b) * 4 + 3]) >> 2;
+        }
+        prev = plain; cw = nw; ch = nh;
+      }
+      var t = new THREE.DataTexture(d0, w, h, THREE.RGBAFormat);
+      t.mipmaps = mips; t.generateMipmaps = false; t.flipY = false;
+      t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+      return finishTex(t, { clamp: !!o.clamp, srgb: true });
+    });
+  };
+  /** opaque per-pixel texture built in JS: fill(data Uint8Array, w, h) -> DataTexture (mipmapped) */
+  G.dataTexture = function (key, w, h, fill, o) {
+    return cached('dt:' + key + ':' + w, function () {
+      var d = new Uint8Array(w * h * 4);
+      try { fill(d, w, h); } catch (e) { console.error('[HG.gfx] dataTexture ' + key, e); }
+      var t = new THREE.DataTexture(d, w, h, THREE.RGBAFormat);
+      t.generateMipmaps = true; t.flipY = false; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+      return finishTex(t, o);
+    });
+  };
+
+  var TX = G.tex = {};
+  /** strands: batched short strokes along +y (canvas down) for fur / grass / grain */
+  function strands(ctx, w, h, n, rng, o) {
+    var buckets = 6, len0 = o.len[0], len1 = o.len[1];
+    ctx.lineCap = 'round';
+    for (var b = 0; b < buckets; b++) {
+      var dark = b < buckets / 2, a = (o.alpha || 0.22) * (0.45 + 0.55 * ((b % 3) + 1) / 3);
+      ctx.strokeStyle = dark ? (o.darkCol ? rgba(o.darkCol, a) : 'rgba(0,0,0,' + a + ')') : (o.lightCol ? rgba(o.lightCol, a) : 'rgba(255,255,255,' + a * 0.9 + ')');
+      ctx.lineWidth = (o.width || 1.1) * (0.7 + (b % 3) * 0.35) * (w / 512);
+      ctx.beginPath();
+      for (var i = 0; i < n / buckets; i++) {
+        var x = rng() * w, y = rng() * h, L = (len0 + rng() * (len1 - len0)) * (w / 512), ang = (rng() - 0.5) * (o.spread || 0.5) + (o.angle || 0);
+        var dx = Math.sin(ang) * L, dy = Math.cos(ang) * L, bend = (rng() - 0.5) * L * 0.35;
+        wrapDraw(w, h, x, y, L + 2, function (px, py) { ctx.moveTo(px, py); ctx.quadraticCurveTo(px + dx * 0.5 + bend, py + dy * 0.5, px + dx, py + dy); });
+      }
+      ctx.stroke();
+    }
+  }
+  /** Fur: countershaded across x (around the body: back at the edges, belly in the middle), strands along y.
+   *  o: {base, back, belly, strokes, length:[a,b], alpha, mottle, spots:{count,size,color}, stripes:{count,width,color}, size, seed} */
+  TX.fur = function (o) {
+    o = o || {};
+    var size = texSize(o.size || 512), key = 'fur' + JSON.stringify(o);
+    return cached(key + size, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 11);
+      var base = o.base || '#b48a5e', back = o.back || base, belly = o.belly || base;
+      var g = ctx.createLinearGradient(0, 0, size, 0);
+      g.addColorStop(0, back); g.addColorStop(0.16, base); g.addColorStop(0.32, base); g.addColorStop(0.5, belly);
+      g.addColorStop(0.68, base); g.addColorStop(0.84, base); g.addColorStop(1, back);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, size, size);
+      noiseOverlay(ctx, size, size, 5, 4, o.mottle == null ? 0.35 : o.mottle, (o.seed || 11) + 3, 'soft-light');
+      if (o.stripes) {
+        var sc = o.stripes.color || '#2a2016';
+        for (var s = 0; s < (o.stripes.count || 8); s++) {
+          var sx = rng() * size, sw = (o.stripes.width || 0.04) * size * (0.6 + rng() * 0.8);
+          ctx.fillStyle = rgba(sc, 0.55);
+          for (var yy = 0; yy < size; yy += 4) { var off = Math.sin(yy / size * Math.PI * 2 * 2 + s) * sw * 0.8; ctx.fillRect(sx + off - sw / 2, yy, sw * (0.7 + 0.3 * Math.sin(yy * 0.05 + s)), 4.5); }
+        }
+      }
+      if (o.spots) {
+        var spc = o.spots.color || '#f4efe4', ss = (o.spots.size || 0.025) * size;
+        for (var p = 0; p < (o.spots.count || 40); p++) {
+          var px = rng() * size, py = rng() * size, r = ss * (0.6 + rng() * 0.7);
+          wrapDraw(size, size, px, py, r * 2, function (x, y) {
+            var rg = ctx.createRadialGradient(x, y, 0, x, y, r); rg.addColorStop(0, rgba(spc, 0.95)); rg.addColorStop(0.65, rgba(spc, 0.7)); rg.addColorStop(1, rgba(spc, 0));
+            ctx.fillStyle = rg; ctx.beginPath(); ctx.ellipse(x, y, r * 0.8, r * 1.2, 0, 0, Math.PI * 2); ctx.fill();
+          });
+        }
+      }
+      strands(ctx, size, size, Math.round((o.strokes || 9000) * (size / 512) * (size / 512)), rng, { len: o.length || [6, 16], alpha: o.alpha || 0.2, spread: o.spread || 0.45, width: o.width || 1.1 });
+      var t = finishTex(new THREE.CanvasTexture(c));
+      t.userData.canvas = c;
+      return t;
+    });
+  };
+  /** normal map matching a fur/feather/scales texture (High quality only) */
+  TX.normalOf = function (tex, strength) {
+    if (!tex || !tex.userData || !tex.userData.canvas) return null;
+    return normalTex(tex.uuid, tex.userData.canvas, strength || 2.5);
+  };
+  /** Neutral fur DETAIL texture (mean ~ white): tint it with vertex colours (coat painting) */
+  TX.furDetail = function (o) {
+    o = o || {};
+    return TX.fur({ base: o.base || '#f3efe8', back: o.back || '#ece6dc', belly: o.belly || '#f7f4ee', strokes: o.strokes || 11000, length: o.length || [5, 13], alpha: o.alpha || 0.26, mottle: o.mottle == null ? 0.25 : o.mottle, seed: o.seed || 21, size: o.size || 512, spread: o.spread });
+  };
+  /** Plumage tile: overlapping feathers pointing +y. o: {base, tip, edge, barred, iridescent:[c1,c2], size, rows, seed} */
+  TX.feathers = function (o) {
+    o = o || {};
+    var size = texSize(o.size || 512);
+    return cached('feathers' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 5);
+      ctx.fillStyle = shade(o.base || '#6b5a44', 0.7); ctx.fillRect(0, 0, size, size);
+      var rows = o.rows || 10, cols = o.cols || 8, fw = size / cols, fh = size / rows;
+      for (var r = 0; r < rows + 1; r++) for (var q = 0; q < cols + 1; q++) {
+        var x = (q + (r % 2) * 0.5) * fw + (rng() - 0.5) * fw * 0.15, y = r * fh;
+        wrapDraw(size, size, x, y, fw * 1.4, function (px, py) {
+          var g = ctx.createLinearGradient(px, py - fh * 1.3, px, py + fh * 0.2);
+          var b0 = o.base || '#6b5a44', tip = o.tip || shade(b0, 1.25);
+          if (o.iridescent) { g.addColorStop(0, o.iridescent[0]); g.addColorStop(0.55, o.iridescent[1] || b0); g.addColorStop(1, b0); }
+          else { g.addColorStop(0, shade(b0, 0.8)); g.addColorStop(0.75, b0); g.addColorStop(1, tip); }
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.moveTo(px - fw * 0.55, py - fh * 1.4); ctx.quadraticCurveTo(px - fw * 0.62, py, px, py + fh * 0.25); ctx.quadraticCurveTo(px + fw * 0.62, py, px + fw * 0.55, py - fh * 1.4); ctx.closePath(); ctx.fill();
+          if (o.edge) { ctx.strokeStyle = rgba(o.edge, 0.85); ctx.lineWidth = fw * 0.07; ctx.beginPath(); ctx.moveTo(px - fw * 0.5, py - fh * 0.2); ctx.quadraticCurveTo(px, py + fh * 0.35, px + fw * 0.5, py - fh * 0.2); ctx.stroke(); }
+          if (o.barred) { ctx.strokeStyle = rgba(o.barred, 0.55); ctx.lineWidth = fh * 0.12; for (var bb = 1; bb < 3; bb++) { ctx.beginPath(); ctx.moveTo(px - fw * 0.5, py - fh * 0.42 * bb); ctx.quadraticCurveTo(px, py - fh * 0.42 * bb + fh * 0.15, px + fw * 0.5, py - fh * 0.42 * bb); ctx.stroke(); } }
+          ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(px, py - fh * 1.2); ctx.lineTo(px, py + fh * 0.15); ctx.stroke();
+        });
+      }
+      strands(ctx, size, size, 2500 * (size / 512), rng, { len: [3, 7], alpha: 0.12, spread: 1.2, width: 0.7 });
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** One feather on a transparent card (vane along +y toward the top). o: {base, tip, bands, bandColor, shaft, width, seed} -> alpha DataTexture */
+  TX.feather = function (o) {
+    o = o || {};
+    var W = texSize(128), H = W * 4;
+    return G.alphaTexture('feather' + JSON.stringify(o), cached('fc' + JSON.stringify(o) + W, function () {
+      var c = mkCanvas(W, H), ctx = c.getContext('2d'), rng = U.rng(o.seed || 9), cx = W / 2, wd = W * 0.46 * (o.width || 1);
+      var g = ctx.createLinearGradient(0, H, 0, 0); g.addColorStop(0, shade(o.base || '#5a4632', 0.75)); g.addColorStop(0.6, o.base || '#5a4632'); g.addColorStop(1, o.tip || shade(o.base || '#5a4632', 1.2));
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.moveTo(cx, H * 0.98); ctx.bezierCurveTo(cx - wd, H * 0.8, cx - wd, H * 0.15, cx - wd * 0.2, H * 0.02); ctx.lineTo(cx + wd * 0.15, H * 0.02); ctx.bezierCurveTo(cx + wd * 0.9, H * 0.2, cx + wd * 0.8, H * 0.8, cx, H * 0.98); ctx.fill();
+      if (o.bands) { ctx.save(); ctx.globalCompositeOperation = 'source-atop'; ctx.fillStyle = rgba(o.bandColor || '#f2ead8', 0.85); for (var b = 0; b < o.bands; b++) { var y = H * (0.15 + 0.7 * b / o.bands); ctx.beginPath(); ctx.moveTo(0, y); ctx.quadraticCurveTo(cx, y - H * 0.03, W, y); ctx.lineTo(W, y + H * 0.035); ctx.quadraticCurveTo(cx, y, 0, y + H * 0.035); ctx.fill(); } ctx.restore(); }
+      ctx.save(); ctx.globalCompositeOperation = 'source-atop'; ctx.strokeStyle = 'rgba(0,0,0,.22)'; ctx.lineWidth = 1;
+      for (var i = 0; i < 70; i++) { var yy = H * (0.05 + 0.9 * i / 70); ctx.beginPath(); ctx.moveTo(cx, yy + 6); ctx.lineTo(cx - wd, yy - 4 + rng() * 3); ctx.moveTo(cx, yy + 6); ctx.lineTo(cx + wd, yy - 4 + rng() * 3); ctx.stroke(); }
+      ctx.restore();
+      ctx.strokeStyle = o.shaft || 'rgba(235,225,205,.9)'; ctx.lineWidth = W * 0.035; ctx.beginPath(); ctx.moveTo(cx, H); ctx.lineTo(cx, H * 0.04); ctx.stroke();
+      return c;
+    }), { clamp: true });
+  };
+  /** Reptile scales/scutes. o: {base, dark, light, rows, cols, scutes, size, seed} */
+  TX.scales = function (o) {
+    o = o || {};
+    var size = texSize(o.size || 512);
+    return cached('scales' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 3), rows = o.rows || 12, cols = o.cols || 8;
+      ctx.fillStyle = o.dark || '#262a1c'; ctx.fillRect(0, 0, size, size);
+      var cw = size / cols, ch = size / rows;
+      for (var r = 0; r < rows; r++) for (var q = 0; q < cols; q++) {
+        var x = q * cw + (r % 2 ? cw * 0.5 : 0), y = r * ch, sh = 0.85 + rng() * 0.3;
+        wrapDraw(size, size, x + cw / 2, y + ch / 2, cw, function (px, py) {
+          var g = ctx.createRadialGradient(px - cw * 0.15, py - ch * 0.2, 1, px, py, cw * 0.6);
+          g.addColorStop(0, shade(o.light || '#6d7450', sh)); g.addColorStop(1, shade(o.base || '#454b30', sh));
+          ctx.fillStyle = g; var gap = cw * 0.08;
+          if (o.scutes) { ctx.beginPath(); ctx.ellipse(px, py, cw / 2 - gap, ch / 2 - gap, 0, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.ellipse(px, py + ch * 0.1, cw * 0.12, ch * 0.18, 0, 0, Math.PI * 2); ctx.fill(); }
+          else ctx.fillRect(px - cw / 2 + gap, py - ch / 2 + gap, cw - gap * 2, ch - gap * 2);
+        });
+      }
+      noiseOverlay(ctx, size, size, 6, 4, 0.3, 4, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Bark painter for a canvas region (used by TX.bark and the vegetation atlas). style: 'pine'|'oak'|'birch'|'dead'|'plate'|'smooth' */
+  function paintBark(ctx, X, Y, w, h, style, rng, col) {
+    col = col || {};
+    var base = col.base || { pine: '#6e4a33', oak: '#5b5046', birch: '#e8e4da', dead: '#8d8679', plate: '#7a5a42', smooth: '#7d756a' }[style] || '#6b4a33';
+    var dark = col.dark || shade(base, style === 'birch' ? 0.25 : 0.42), light = col.light || shade(base, 1.35);
+    ctx.save(); ctx.beginPath(); ctx.rect(X, Y, w, h); ctx.clip();
+    ctx.fillStyle = base; ctx.fillRect(X, Y, w, h);
+    var i, x, y;
+    if (style === 'birch') {
+      for (i = 0; i < h / 7; i++) { ctx.fillStyle = rgba(dark, 0.45 + rng() * 0.4); x = X + rng() * w; y = Y + rng() * h; ctx.fillRect(x, y, w * (0.05 + rng() * 0.2), 1 + rng() * 2.5); }
+      for (i = 0; i < h / 60; i++) { x = X + rng() * w; y = Y + rng() * h; ctx.fillStyle = rgba('#1c1a18', 0.85); ctx.beginPath(); ctx.ellipse(x, y, w * (0.08 + rng() * 0.18), 2 + rng() * 6, 0, 0, Math.PI * 2); ctx.fill(); }
+      for (i = 0; i < h / 40; i++) { x = X + rng() * w; y = Y + rng() * h; ctx.fillStyle = rgba('#c9a77a', 0.35); ctx.fillRect(x, y, w * 0.2 * rng(), 3 + rng() * 6); }
+      var gb = ctx.createLinearGradient(X, 0, X + w, 0); gb.addColorStop(0, 'rgba(0,0,0,.16)'); gb.addColorStop(0.5, 'rgba(0,0,0,0)'); gb.addColorStop(1, 'rgba(0,0,0,.16)');
+      ctx.fillStyle = gb; ctx.fillRect(X, Y, w, h);
+    } else {
+      var furrows = style === 'oak' ? 9 : style === 'dead' ? 6 : style === 'smooth' ? 3 : 7;
+      // plates
+      for (i = 0; i < h * w / 300; i++) { x = X + rng() * w; y = Y + rng() * h; ctx.fillStyle = rgba(rng() < 0.5 ? light : dark, 0.08 + rng() * 0.12); ctx.fillRect(x, y, 2 + rng() * w / furrows, 4 + rng() * 26); }
+      ctx.lineCap = 'round';
+      for (var f = 0; f < furrows * 2; f++) {
+        x = X + (f + rng() * 0.6) * w / (furrows * 2) * 2 % w; ctx.strokeStyle = rgba(dark, 0.55 + rng() * 0.35);
+        ctx.lineWidth = (style === 'oak' ? 2.6 : 1.8) * (0.6 + rng()) * (w / 128); ctx.beginPath(); ctx.moveTo(x, Y - 5);
+        for (y = Y; y < Y + h + 10; y += 10 + rng() * 14) { x += (rng() - 0.5) * (style === 'oak' ? 7 : 4) * (w / 128); ctx.lineTo(x, y); }
+        ctx.stroke();
+      }
+      if (style === 'pine' || style === 'plate') for (i = 0; i < h / 9; i++) { x = X + rng() * w; y = Y + rng() * h; ctx.strokeStyle = rgba(dark, 0.6); ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w / furrows * (0.5 + rng()), y + (rng() - 0.5) * 3); ctx.stroke(); }
+      if (style === 'pine') { for (i = 0; i < h / 10; i++) { x = X + rng() * w; y = Y + rng() * h; ctx.fillStyle = rgba('#a5653f', 0.25 + rng() * 0.25); ctx.fillRect(x, y, 3 + rng() * w / 9, 3 + rng() * 10); } }
+      if (style === 'dead') { for (i = 0; i < 6; i++) { x = X + rng() * w; ctx.strokeStyle = rgba('#3d3832', 0.5); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, Y); ctx.lineTo(x + (rng() - 0.5) * 8, Y + h); ctx.stroke(); } }
+      if (col.moss) for (i = 0; i < h / 12; i++) { x = X + rng() * w; y = Y + h * (0.6 + rng() * 0.4); ctx.fillStyle = rgba(col.moss, 0.2 + rng() * 0.3); ctx.beginPath(); ctx.arc(x, y, 2 + rng() * 6, 0, Math.PI * 2); ctx.fill(); }
+    }
+    ctx.restore();
+  }
+  G.paintBark = paintBark;
+  /** Bark texture (tileable). o: {style, base, dark, light, moss, size:[w,h], seed} */
+  TX.bark = function (o) {
+    o = o || {};
+    var w = texSize((o.size && o.size[0]) || 256), h = texSize((o.size && o.size[1]) || 512);
+    return cached('bark' + JSON.stringify(o) + w, function () {
+      var c = mkCanvas(w, h), ctx = c.getContext('2d'); paintBark(ctx, 0, 0, w, h, o.style || 'pine', U.rng(o.seed || 2), o);
+      noiseOverlay(ctx, w, h, 4, 4, 0.25, 9, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Wood grain along +y. o: {base, dark, light, figure 0..1, rings, size:[w,h], seed, checker:[{x,y,w,h}] (normalised rects with checkering)} */
+  TX.woodGrain = function (o) {
+    o = o || {};
+    var w = texSize((o.size && o.size[0]) || 256), h = texSize((o.size && o.size[1]) || 1024);
+    return cached('wood' + JSON.stringify(o) + w, function () {
+      var c = mkCanvas(w, h), ctx = c.getContext('2d'), rng = U.rng(o.seed || 4);
+      var base = o.base || '#8a5530', dark = o.dark || '#4a2814', light = o.light || '#b77b48';
+      ctx.fillStyle = base; ctx.fillRect(0, 0, w, h);
+      var rings = o.rings || 26;
+      for (var i = 0; i < rings; i++) {
+        var x0 = rng() * w, amp = 6 + rng() * 18, fr = 1 + rng() * 2.5, ph = rng() * 6.28;
+        ctx.strokeStyle = rgba(rng() < 0.65 ? dark : light, 0.18 + rng() * 0.3); ctx.lineWidth = (0.8 + rng() * 2.6) * (w / 256);
+        ctx.beginPath();
+        for (var y = -4; y <= h + 4; y += 8) { var x = x0 + Math.sin(y / h * 6.283 * fr + ph) * amp + Math.sin(y / h * 6.283 * 7 + ph * 2) * 2; if (y === -4) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+        ctx.stroke();
+        ctx.beginPath(); for (y = -4; y <= h + 4; y += 8) { var x2 = x0 - w + Math.sin(y / h * 6.283 * fr + ph) * amp; if (y === -4) ctx.moveTo(x2, y); else ctx.lineTo(x2, y); } ctx.stroke();
+        ctx.beginPath(); for (y = -4; y <= h + 4; y += 8) { var x3 = x0 + w + Math.sin(y / h * 6.283 * fr + ph) * amp; if (y === -4) ctx.moveTo(x3, y); else ctx.lineTo(x3, y); } ctx.stroke();
+      }
+      strands(ctx, w, h, 3000 * (w / 256), rng, { len: [8, 30], alpha: 0.12, spread: 0.08, width: 0.8, darkCol: dark });
+      if (o.figure) { for (var k = 0; k < h; k += 6 + rng() * 10) { ctx.fillStyle = rgba(rng() < 0.5 ? light : dark, 0.05 * o.figure + rng() * 0.08 * o.figure); ctx.fillRect(0, k, w, 2 + rng() * 5); } }
+      noiseOverlay(ctx, w, h, 3, 3, 0.3, 12, 'soft-light');
+      (o.checker || []).forEach(function (r) {
+        var rx = r.x * w, ry = r.y * h, rw = r.w * w, rh = r.h * h, s = Math.max(2, w / 96);
+        ctx.save(); ctx.beginPath(); ctx.rect(rx, ry, rw, rh); ctx.clip();
+        ctx.fillStyle = 'rgba(30,15,6,.35)'; ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeStyle = 'rgba(20,10,4,.55)'; ctx.lineWidth = s * 0.45;
+        for (var d = -rh; d < rw + rh; d += s) { ctx.beginPath(); ctx.moveTo(rx + d, ry); ctx.lineTo(rx + d + rh * 0.6, ry + rh); ctx.stroke(); ctx.beginPath(); ctx.moveTo(rx + d, ry + rh); ctx.lineTo(rx + d + rh * 0.6, ry); ctx.stroke(); }
+        ctx.strokeStyle = 'rgba(255,220,170,.12)'; ctx.lineWidth = 1; ctx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2);
+        ctx.restore();
+      });
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Gun metal. o: {type:'blued'|'parkerized'|'brushed'|'stainless'|'black', size, seed} */
+  TX.metal = function (o) {
+    o = typeof o === 'string' ? { type: o } : (o || {});
+    var size = texSize(o.size || 256), type = o.type || 'blued';
+    return cached('metal' + type + size + (o.seed || 0), function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 8);
+      var base = { blued: '#2b3240', parkerized: '#4a4d47', brushed: '#a3a8ad', stainless: '#c1c5c9', black: '#2a2b2d' }[type] || '#2b3240';
+      ctx.fillStyle = base; ctx.fillRect(0, 0, size, size);
+      if (type === 'parkerized') { for (var i = 0; i < size * size / 6; i++) { ctx.fillStyle = rng() < 0.5 ? 'rgba(0,0,0,.18)' : 'rgba(255,255,255,.08)'; ctx.fillRect(rng() * size, rng() * size, 1, 1); } }
+      else {
+        for (var j = 0; j < size * 1.5; j++) { var y = rng() * size; ctx.fillStyle = rng() < 0.5 ? 'rgba(255,255,255,' + (0.02 + rng() * 0.05) + ')' : 'rgba(0,0,0,' + (0.03 + rng() * 0.06) + ')'; ctx.fillRect(0, y, size, 0.6 + rng()); }
+        if (type === 'blued') { ctx.globalAlpha = 0.12; ctx.fillStyle = '#4a5f8a'; ctx.fillRect(0, 0, size, size); ctx.globalAlpha = 1; }
+      }
+      noiseOverlay(ctx, size, size, 3, 3, type === 'blued' ? 0.25 : 0.18, 21, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Leather. o: {base, dark, size, seed, stitch} */
+  TX.leather = function (o) {
+    o = o || {};
+    var size = texSize(o.size || 256);
+    return cached('leather' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 6), base = o.base || '#5a3b26', dark = o.dark || shade(base, 0.55);
+      ctx.fillStyle = base; ctx.fillRect(0, 0, size, size);
+      for (var i = 0; i < size * size / 14; i++) { var x = rng() * size, y = rng() * size, r = 1 + rng() * 2.2; ctx.fillStyle = rgba(rng() < 0.6 ? dark : shade(base, 1.3), 0.18); ctx.beginPath(); ctx.arc(x, y, r, 0, 6.283); ctx.fill(); }
+      ctx.lineCap = 'round';
+      for (var k = 0; k < 26; k++) { ctx.strokeStyle = rgba(dark, 0.25 + rng() * 0.2); ctx.lineWidth = 0.8 + rng(); var x0 = rng() * size, y0 = rng() * size; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(x0 + (rng() - 0.5) * 40, y0 + (rng() - 0.5) * 40, x0 + (rng() - 0.5) * 70, y0 + (rng() - 0.5) * 30); ctx.stroke(); }
+      noiseOverlay(ctx, size, size, 4, 4, 0.4, 13, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Fabric (woven) with optional colour. o: {base, size, seed} */
+  TX.fabric = function (o) {
+    o = o || {};
+    var size = texSize(o.size || 256);
+    return cached('fabric' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 14);
+      ctx.fillStyle = o.base || '#ffffff'; ctx.fillRect(0, 0, size, size);
+      for (var y = 0; y < size; y += 2) { ctx.fillStyle = 'rgba(0,0,0,' + (0.04 + rng() * 0.05) + ')'; ctx.fillRect(0, y, size, 1); }
+      for (var x = 0; x < size; x += 2) { ctx.fillStyle = 'rgba(255,255,255,' + (0.03 + rng() * 0.04) + ')'; ctx.fillRect(x, 0, 1, size); }
+      noiseOverlay(ctx, size, size, 4, 4, 0.3, 15, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Camo. o: {pattern:'woodland'|'leafy'|'digital'|'blaze'|'marsh'|'snow', palette:[c0..c3], size, seed} */
+  TX.camo = function (o) {
+    o = typeof o === 'string' ? { pattern: o } : (o || {});
+    var size = texSize(o.size || 512), pat = o.pattern || 'woodland';
+    var pal = o.palette || {
+      woodland: ['#5d5a3c', '#3b3a26', '#7a6a48', '#262418'], leafy: ['#6e6250', '#4b4233', '#8b7a5c', '#2f3b25'], digital: ['#6b6a52', '#4a4a38', '#8a8566', '#2e2e24'],
+      blaze: ['#ff6a12', '#e05208', '#ff8a3a', '#c94a06'], marsh: ['#9a8a62', '#6f6142', '#b8a77a', '#4a4030'], snow: ['#eef1f2', '#c9cfd3', '#a8b0b6', '#ffffff']
+    }[pat] || ['#5d5a3c', '#3b3a26', '#7a6a48', '#262418'];
+    return cached('camo' + pat + JSON.stringify(pal) + size + (o.seed || 0), function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(o.seed || 31), i;
+      ctx.fillStyle = pal[0]; ctx.fillRect(0, 0, size, size);
+      function blob(cx, cy, r, colr) {
+        wrapDraw(size, size, cx, cy, r * 1.6, function (x, y) {
+          ctx.fillStyle = colr; ctx.beginPath();
+          var n = 9; for (var k = 0; k <= n; k++) { var a = k / n * 6.283, rr = r * (0.6 + 0.5 * hash2(k, Math.round(cx), Math.round(cy))); var px = x + Math.cos(a) * rr * 1.4, py = y + Math.sin(a) * rr; if (k === 0) ctx.moveTo(px, py); else ctx.quadraticCurveTo(x + Math.cos(a - 0.35) * rr * 1.9, y + Math.sin(a - 0.35) * rr * 1.3, px, py); }
+          ctx.fill();
+        });
+      }
+      if (pat === 'digital') {
+        var px = size / 48;
+        for (var l = 1; l < 4; l++) for (var y = 0; y < size; y += px) for (var x = 0; x < size; x += px) if (fbm(x / size, y / size, 4, 3, l * 7) > 0.55 + l * 0.02) { ctx.fillStyle = pal[l]; ctx.fillRect(x, y, px, px); }
+      } else if (pat === 'blaze') {
+        noiseOverlay(ctx, size, size, 6, 4, 0.35, 5, 'soft-light');
+        for (var y2 = 0; y2 < size; y2 += 3) { ctx.fillStyle = 'rgba(0,0,0,.05)'; ctx.fillRect(0, y2, size, 1); }
+      } else if (pat === 'marsh') {
+        ctx.lineCap = 'round';
+        for (i = 0; i < 600; i++) { ctx.strokeStyle = pal[1 + (i % 3)]; ctx.lineWidth = 2 + rng() * 5; var x0 = rng() * size, y0 = rng() * size, L = 40 + rng() * 120; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(x0 + (rng() - 0.5) * 30, y0 - L / 2, x0 + (rng() - 0.5) * 50, y0 - L); ctx.stroke(); }
+      } else {
+        for (var layer = 1; layer < 4; layer++) for (i = 0; i < (pat === 'leafy' ? 14 : 22); i++) blob(rng() * size, rng() * size, size * (0.04 + rng() * 0.07), pal[layer]);
+        if (pat === 'leafy') {
+          ctx.lineCap = 'round';
+          for (i = 0; i < 60; i++) { ctx.strokeStyle = rgba(pal[3], 0.7); ctx.lineWidth = 2 + rng() * 3; var bx = rng() * size, by = rng() * size; ctx.beginPath(); ctx.moveTo(bx, by); ctx.quadraticCurveTo(bx + 30, by - 40, bx + (rng() - 0.5) * 90, by - 90); ctx.stroke(); }
+          for (i = 0; i < 260; i++) { var lx = rng() * size, ly = rng() * size, lr = 6 + rng() * 14, la = rng() * 6.28, lc = pal[(i % 3) + 1]; wrapDraw(size, size, lx, ly, lr * 2, function (x, y) { ctx.save(); ctx.translate(x, y); ctx.rotate(la); ctx.fillStyle = lc; ctx.beginPath(); ctx.ellipse(0, 0, lr * 0.45, lr, 0, 0, 6.283); ctx.fill(); ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, -lr); ctx.lineTo(0, lr); ctx.stroke(); ctx.restore(); }); }
+        }
+      }
+      noiseOverlay(ctx, size, size, 8, 3, 0.18, 2, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Grayscale fbm noise texture. o: {size, period, octaves, seed, srgb:false} */
+  TX.noise = function (o) {
+    o = o || {};
+    var size = o.size || 256;
+    return cached('noise' + JSON.stringify(o), function () { return finishTex(new THREE.CanvasTexture(noiseCanvas(size, o.period || 4, o.octaves || 4, o.seed || 1)), { srgb: !!o.srgb }); });
+  };
+  /** Antler / horn surface: longitudinal grooves along +y, mean ~white (tint by vertex colour) */
+  TX.antler = function () {
+    var size = texSize(256);
+    return cached('antlertex' + size, function () {
+      var c = mkCanvas(size), ctx = c.getContext('2d'), rng = U.rng(77);
+      ctx.fillStyle = '#efe9dd'; ctx.fillRect(0, 0, size, size);
+      strands(ctx, size, size, 1600 * (size / 256), rng, { len: [20, 70], alpha: 0.28, spread: 0.06, width: 1.4 });
+      noiseOverlay(ctx, size, size, 5, 4, 0.35, 41, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+
+  /* ---------------- materials (quality aware, cached, shared) ---------------- */
+  var gmatCache = {};
+  var windUniforms = { uTime: { value: 0 }, uWind: { value: new THREE.Vector3(1, 0, 0.5) }, uPlayer: { value: new THREE.Vector3() } };
+  G.windUniforms = windUniforms;
+  function matKey(o) {
+    var k = [];
+    for (var p in o) { var v = o[p]; if (v && v.isTexture) v = v.uuid; else if (v && typeof v === 'object') v = JSON.stringify(v); k.push(p + '=' + v); }
+    return k.sort().join('|');
+  }
+  /** Wind sway + distance fade vertex patch (instanced vegetation). cfg: {amp, fade:[r0,r1] (grass), flutter} */
+  function windPatch(shader, cfg) {
+    shader.uniforms.uTime = windUniforms.uTime; shader.uniforms.uWind = windUniforms.uWind; shader.uniforms.uPlayer = windUniforms.uPlayer;
+    shader.uniforms.uSway = { value: cfg.amp == null ? 0.02 : cfg.amp };
+    shader.uniforms.uFade = { value: new THREE.Vector2(cfg.fade ? cfg.fade[0] : 1e6, cfg.fade ? cfg.fade[1] : 2e6) };
+    shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uWind; uniform vec3 uPlayer; uniform float uSway; uniform vec2 uFade;')
+      .replace('#include <project_vertex>', [
+        'vec4 mvPosition = vec4( transformed, 1.0 );',
+        '#ifdef USE_INSTANCING',
+        ' mvPosition = instanceMatrix * mvPosition;',
+        '#endif',
+        '{ float hh = max(transformed.y, 0.0);',
+        '  vec3 org = vec3(0.0);',
+        '  #ifdef USE_INSTANCING',
+        '  org = instanceMatrix[3].xyz;',
+        '  #endif',
+        '  float ph = dot(org.xz, vec2(0.37, 0.23));',
+        '  float fd = 1.0 - smoothstep(uFade.x, uFade.y, distance(org.xz, uPlayer.xz));',
+        '  mvPosition.y = mix(org.y - 0.05, mvPosition.y, fd);',
+        '  float gust = 0.55 + 0.45 * sin(uTime * 1.3 + ph) + 0.25 * sin(uTime * 3.7 + ph * 2.3 + transformed.x * 1.7);',
+        '  vec2 sw = uWind.xy * (uWind.z * uSway * hh * hh * gust);',
+        '  mvPosition.xz += sw; mvPosition.y -= dot(sw, sw) * 0.5 / max(hh, 0.3); }',
+        'mvPosition = modelViewMatrix * mvPosition;',
+        'gl_Position = projectionMatrix * mvPosition;'
+      ].join('\n'));
+  }
+  function applyWind(m, cfg) {
+    m.onBeforeCompile = function (shader) { windPatch(shader, cfg); m.userData.shader = shader; };
+    // distinct program key per cfg shape (uniform values differ only)
+    m.customProgramCacheKey = function () { return 'hgwind'; };
+  }
+  G.applyWind = applyWind;
+  /** Depth material for alpha-tested / wind-swayed meshes (shadow casters). */
+  G.depthMaterial = function (m) {
+    if (m.userData.depthMat) return m.userData.depthMat;
+    var d = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: m.map || null, alphaTest: m.alphaTest || 0, side: m.side });
+    if (m.userData.wind) applyWind(d, m.userData.wind);
+    d.userData.shared = true;
+    m.userData.depthMat = d;
+    return d;
+  };
+  /** G.mat(opts) -> cached shared material. High/Ultra: MeshStandardMaterial; Low: Lambert (Phong for metal/gloss).
+   *  opts: {color, map, normalMap, normalScale, roughness (0.8), metalness (0), vertexColors, skinning, side, alphaTest,
+   *         transparent, opacity, depthWrite, emissive, emissiveIntensity, envMapIntensity, flat, fog, wind:{amp, fade}, key} */
+  G.mat = function (o) {
+    o = o || {};
+    var low = G.isLow(), key = (o.key || matKey(o)) + (low ? '#L' : '#H');
+    var m = gmatCache[key]; if (m) return m;
+    var p = {};
+    if (o.color != null) p.color = G.color(o.color);
+    if (o.map) p.map = o.map;
+    if (o.vertexColors) p.vertexColors = true;
+    if (o.skinning) p.skinning = true;
+    if (o.side != null) p.side = o.side;
+    if (o.alphaTest) p.alphaTest = o.alphaTest;
+    if (o.transparent) { p.transparent = true; p.opacity = o.opacity == null ? 1 : o.opacity; }
+    if (o.depthWrite === false) p.depthWrite = false;
+    if (o.emissive != null) p.emissive = G.color(o.emissive);
+    if (o.fog === false) p.fog = false;
+    var metal = o.metalness || 0, rough = o.roughness == null ? 0.8 : o.roughness;
+    if (low) {
+      if (metal > 0.4 || rough < 0.35) { p.shininess = Math.round(10 + (1 - rough) * 80); p.specular = new THREE.Color(metal > 0.4 ? 0x8a8a8a : 0x404040); m = new THREE.MeshPhongMaterial(p); }
+      else m = new THREE.MeshLambertMaterial(p);
+    } else {
+      p.roughness = rough; p.metalness = metal;
+      if (o.normalMap) { p.normalMap = o.normalMap; var ns = o.normalScale == null ? 1 : o.normalScale; p.normalScale = new THREE.Vector2(ns, ns); }
+      if (o.roughnessMap) p.roughnessMap = o.roughnessMap;
+      if (o.flat) p.flatShading = true;
+      m = new THREE.MeshStandardMaterial(p);
+      if (o.envMapIntensity != null) m.envMapIntensity = o.envMapIntensity;
+    }
+    if (o.emissiveIntensity != null && m.emissive) m.emissiveIntensity = o.emissiveIntensity;
+    if (o.wind) { m.userData.wind = o.wind; applyWind(m, o.wind); }
+    m.userData.shared = true; m.userData.gfx = true;
+    gmatCache[key] = m;
+    return m;
+  };
+
+  /* ---------------- geometry utilities ---------------- */
+  var _gv = new THREE.Vector3(), _gv2 = new THREE.Vector3(), _gv3 = new THREE.Vector3(), _gv4 = new THREE.Vector3(), _gc = new THREE.Color();
+  var _gm = new THREE.Matrix4(), _gq = new THREE.Quaternion(), _ge = new THREE.Euler(), _gs = new THREE.Vector3();
+  /** Merge any BufferGeometries (indexed or not) into one indexed geometry. Missing attributes get defaults
+   *  (color 1, skinWeight [1,0,0,0], others 0). opts {groups:true|[materialIndex...], keep:false} */
+  G.merge = function (geos, opts) {
+    opts = opts || {};
+    var list = []; for (var i = 0; i < geos.length; i++) if (geos[i] && geos[i].attributes && geos[i].attributes.position) list.push(geos[i]);
+    var out = new THREE.BufferGeometry();
+    if (!list.length) return out;
+    var names = {}, k;
+    list.forEach(function (g) { for (k in g.attributes) if (!names[k]) names[k] = g.attributes[k].itemSize; });
+    var vtot = 0, itot = 0;
+    list.forEach(function (g) { var n = g.attributes.position.count; vtot += n; itot += g.index ? g.index.count : n; });
+    var arrs = {}; for (k in names) arrs[k] = new Float32Array(vtot * names[k]);
+    var idx = vtot > 65535 ? new Uint32Array(itot) : new Uint16Array(itot), vo = 0, io = 0;
+    list.forEach(function (g, gi) {
+      var n = g.attributes.position.count, j, c;
+      for (k in names) {
+        var a = g.attributes[k], sz = names[k], dst = arrs[k];
+        if (a) { var src = a.array, isz = a.itemSize; for (j = 0; j < n; j++) for (c = 0; c < sz; c++) dst[(vo + j) * sz + c] = c < isz ? src[j * isz + c] : 0; }
+        else { var dv = k === 'color' ? 1 : 0; for (j = 0; j < n; j++) for (c = 0; c < sz; c++) dst[(vo + j) * sz + c] = (k === 'skinWeight' ? (c === 0 ? 1 : 0) : dv); }
+      }
+      var cnt;
+      if (g.index) { cnt = g.index.count; for (j = 0; j < cnt; j++) idx[io + j] = g.index.array[j] + vo; }
+      else { cnt = n; for (j = 0; j < n; j++) idx[io + j] = vo + j; }
+      if (opts.groups) out.addGroup(io, cnt, opts.groups === true ? gi : opts.groups[gi]);
+      io += cnt; vo += n;
+      if (!opts.keep && !(g.userData && g.userData.shared)) g.dispose();
+    });
+    for (k in names) out.setAttribute(k, new THREE.BufferAttribute(arrs[k], names[k]));
+    out.setIndex(new THREE.BufferAttribute(idx, 1));
+    out.computeBoundingSphere(); out.computeBoundingBox();
+    return out;
+  };
+  /** In-place transform: pos [x,y,z], rot [x,y,z] (Euler XYZ) or Quaternion, scale number|[x,y,z] */
+  G.xform = function (g, pos, rot, scale) {
+    _gs.set(1, 1, 1); if (scale != null) { if (typeof scale === 'number') _gs.set(scale, scale, scale); else _gs.set(scale[0], scale[1], scale[2]); }
+    if (rot && rot.isQuaternion) _gq.copy(rot); else { _ge.set(rot ? rot[0] : 0, rot ? rot[1] : 0, rot ? rot[2] : 0, (rot && rot[3]) || 'XYZ'); _gq.setFromEuler(_ge); }
+    _gv.set(pos ? pos[0] : 0, pos ? pos[1] : 0, pos ? pos[2] : 0);
+    g.applyMatrix4(_gm.compose(_gv, _gq, _gs));
+    return g;
+  };
+  /** Mirror across X (fixes winding + normals). */
+  G.mirrorX = function (g) {
+    g.scale(-1, 1, 1);
+    if (g.index) { var a = g.index.array; for (var i = 0; i < a.length; i += 3) { var t = a[i + 1]; a[i + 1] = a[i + 2]; a[i + 2] = t; } g.index.needsUpdate = true; }
+    else { var names = Object.keys(g.attributes); names.forEach(function (n) { var at = g.attributes[n], s = at.itemSize, arr = at.array; for (var j = 0; j < at.count; j += 3) for (var c = 0; c < s; c++) { var t2 = arr[(j + 1) * s + c]; arr[(j + 1) * s + c] = arr[(j + 2) * s + c]; arr[(j + 2) * s + c] = t2; } at.needsUpdate = true; }); }
+    if (g.attributes.normal) { var nm = g.attributes.normal; for (var q = 0; q < nm.count; q++) nm.setX(q, -nm.getX(q)); nm.needsUpdate = true; }
+    return g;
+  };
+  function ensureColor(g) {
+    var col = g.attributes.color;
+    if (!col) { col = new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 3).fill(1), 3); g.setAttribute('color', col); }
+    return col;
+  }
+  G.ensureColor = ensureColor;
+  /** Vertex paint: fn(c:Color, x,y,z, nx,ny,nz, u,v, i) sets c in sRGB (c.setRGB / c.set) or returns a colour.
+   *  opts {multiply:true (multiply existing), gain:1} — colours are converted to linear. */
+  G.paint = function (g, fn, opts) {
+    opts = opts || {};
+    var p = g.attributes.position, n = g.attributes.normal, uv = g.attributes.uv, cnt = p.count, col = ensureColor(g), gain = opts.gain || 1;
+    for (var i = 0; i < cnt; i++) {
+      _gc.setRGB(1, 1, 1);
+      var r = fn(_gc, p.getX(i), p.getY(i), p.getZ(i), n ? n.getX(i) : 0, n ? n.getY(i) : 1, n ? n.getZ(i) : 0, uv ? uv.getX(i) : 0, uv ? uv.getY(i) : 0, i);
+      if (r != null && r !== _gc && r !== false) _gc.set(r);
+      _gc.convertSRGBToLinear();
+      if (opts.multiply) col.setXYZ(i, col.getX(i) * _gc.r * gain, col.getY(i) * _gc.g * gain, col.getZ(i) * _gc.b * gain);
+      else col.setXYZ(i, Math.min(1, _gc.r * gain), Math.min(1, _gc.g * gain), Math.min(1, _gc.b * gain));
+    }
+    col.needsUpdate = true;
+    return g;
+  };
+  /** Solid colour helper (sRGB in) */
+  G.tint = function (g, color) { _gc.set(color); var r = _gc.r, gg = _gc.g, b = _gc.b; return G.paint(g, function (c) { c.setRGB(r, gg, b); }); };
+  function autoOccluders(g, cells) {
+    g.computeBoundingBox();
+    var bb = g.boundingBox, sx = (bb.max.x - bb.min.x) || 1e-3, sy = (bb.max.y - bb.min.y) || 1e-3, sz = (bb.max.z - bb.min.z) || 1e-3;
+    var cs = Math.max(sx, sy, sz) / cells, map = {}, p = g.attributes.position;
+    for (var i = 0; i < p.count; i++) {
+      var x = p.getX(i), y = p.getY(i), z = p.getZ(i), key = Math.floor((x - bb.min.x) / cs) + ',' + Math.floor((y - bb.min.y) / cs) + ',' + Math.floor((z - bb.min.z) / cs);
+      var e = map[key] || (map[key] = [0, 0, 0, 0]); e[0] += x; e[1] += y; e[2] += z; e[3]++;
+    }
+    var out = []; for (var k in map) { var m = map[k]; out.push([m[0] / m[3], m[1] / m[3], m[2] / m[3], cs * 0.6]); }
+    return out;
+  }
+  /** Vertex ambient occlusion (multiplies the colour attribute).
+   *  opts {occluders:[[x,y,z,r]...]|'auto', cells:10, strength:1, ground:y|null, groundStrength:0.45, groundFalloff:0.35, under:0.25, min:0.35} */
+  G.vertexAO = function (g, opts) {
+    opts = opts || {};
+    if (!g.attributes.normal) g.computeVertexNormals();
+    var p = g.attributes.position, n = g.attributes.normal, cnt = p.count, col = ensureColor(g);
+    var occ = (!opts.occluders || opts.occluders === 'auto') ? autoOccluders(g, opts.cells || 10) : opts.occluders;
+    var st = opts.strength == null ? 1 : opts.strength, mn = opts.min == null ? 0.35 : opts.min, gy = opts.ground, gS = opts.groundStrength == null ? 0.45 : opts.groundStrength, gF = opts.groundFalloff || 0.35, under = opts.under == null ? 0.25 : opts.under;
+    for (var i = 0; i < cnt; i++) {
+      var px = p.getX(i), py = p.getY(i), pz = p.getZ(i), nx = n.getX(i), ny = n.getY(i), nz = n.getZ(i), o = 0;
+      for (var j = 0; j < occ.length; j++) {
+        var s = occ[j], dx = s[0] - px, dy = s[1] - py, dz = s[2] - pz, d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < 1e-8) continue;
+        var d = Math.sqrt(d2), cs = (dx * nx + dy * ny + dz * nz) / d; if (cs <= 0.05) continue;
+        var rr = s[3] / d; if (rr > 1) rr = 1;
+        o += rr * rr * cs;
+      }
+      var ao = 1 - Math.min(1, o * 0.75) * st;
+      ao *= 1 - Math.max(0, -ny) * under;
+      if (gy != null) { var hgt = py - gy; ao *= 1 - gS * (1 - Math.min(1, Math.max(0, hgt / gF))) * (0.4 + 0.6 * Math.max(0, -ny * 0.5 + 0.5)); }
+      if (ao < mn) ao = mn;
+      col.setXYZ(i, col.getX(i) * ao, col.getY(i) * ao, col.getZ(i) * ao);
+    }
+    col.needsUpdate = true;
+    return g;
+  };
+
+  /* ---------------- loft: smooth tube through cross-sections ---------------- */
+  function crs(a0, a1, a2, a3, t) { var t2 = t * t, t3 = t2 * t; return 0.5 * ((2 * a1) + (-a0 + a2) * t + (2 * a0 - 5 * a1 + 4 * a2 - a3) * t2 + (-a0 + 3 * a1 - 3 * a2 + a3) * t3); }
+  /** G.loft(sections, opts) -> indexed BufferGeometry (position, normal, uv).
+   *  section: {p:[x,y,z], rx, ry | ryUp & ryDown, sq (superellipse exponent, 2 = ellipse), n:[x,y,z] (optional 'up' override)}
+   *  opts: {radial:16, steps:3, frame:'up'|'transport', up:[0,1,0], smooth:0 (frame smoothing rings), linear:false,
+   *         capStart:true, capEnd:true, density:2.5 (texture repeats per metre), uRepeat, uRange:[u0,u1], vRange:[v0,v1],
+   *         seam:0 (angle offset), displace:fn(out Vector3, ringT, theta, ringIndex)} */
+  G.loft = function (secs, opts) {
+    opts = opts || {};
+    var R = opts.radial || 16, S = opts.steps || 3, n = secs.length, lin = !!opts.linear;
+    if (n < 2) return new THREE.BufferGeometry();
+    function sv(i, key) {
+      i = i < 0 ? 0 : i > n - 1 ? n - 1 : i; var s = secs[i];
+      switch (key) {
+        case 0: return s.p[0]; case 1: return s.p[1]; case 2: return s.p[2];
+        case 3: return s.rx != null ? s.rx : (s.r != null ? s.r : 0.1);
+        case 4: return s.ryUp != null ? s.ryUp : s.ry != null ? s.ry : s.r != null ? s.r : (s.rx != null ? s.rx : 0.1);
+        case 5: return s.ryDown != null ? s.ryDown : s.ry != null ? s.ry : s.r != null ? s.r : (s.rx != null ? s.rx : 0.1);
+        case 6: return s.sq || 2;
+      }
+      return 0;
+    }
+    var rings = [];
+    for (var i = 0; i < n - 1; i++) {
+      var last = i === n - 2;
+      for (var s = 0; s < (last ? S + 1 : S); s++) {
+        var t = s / S, r = [];
+        for (var k = 0; k < 7; k++) r.push(lin ? sv(i, k) + (sv(i + 1, k) - sv(i, k)) * t : crs(sv(i - 1, k), sv(i, k), sv(i + 1, k), sv(i + 2, k), t));
+        r[3] = Math.max(0.0004, r[3]); r[4] = Math.max(0.0004, r[4]); r[5] = Math.max(0.0004, r[5]);
+        var nn = secs[i].n && secs[i + 1].n ? [secs[i].n[0] + (secs[i + 1].n[0] - secs[i].n[0]) * t, secs[i].n[1] + (secs[i + 1].n[1] - secs[i].n[1]) * t, secs[i].n[2] + (secs[i + 1].n[2] - secs[i].n[2]) * t] : null;
+        rings.push({ x: r[0], y: r[1], z: r[2], rx: r[3], ru: r[4], rd: r[5], sq: r[6], nn: nn });
+      }
+    }
+    var NR = rings.length, T = [], N = [], B = [], arc = [0];
+    for (i = 0; i < NR; i++) {
+      var a = rings[Math.max(0, i - 1)], b = rings[Math.min(NR - 1, i + 1)];
+      var tx = b.x - a.x, ty = b.y - a.y, tz = b.z - a.z, tl = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+      T.push([tx / tl, ty / tl, tz / tl]);
+      if (i > 0) { var p0 = rings[i - 1], p1 = rings[i]; arc.push(arc[i - 1] + Math.sqrt((p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y) + (p1.z - p0.z) * (p1.z - p0.z))); }
+    }
+    var up = opts.up || [0, 1, 0], mode = opts.frame || 'up';
+    function proj(v, t) { var d = v[0] * t[0] + v[1] * t[1] + v[2] * t[2], x = v[0] - t[0] * d, y = v[1] - t[1] * d, z = v[2] - t[2] * d, l = Math.sqrt(x * x + y * y + z * z); return l < 1e-4 ? null : [x / l, y / l, z / l]; }
+    for (i = 0; i < NR; i++) {
+      var nv = null;
+      if (rings[i].nn) nv = proj(rings[i].nn, T[i]);
+      if (!nv && mode === 'up') nv = proj(up, T[i]);
+      if (!nv) nv = i > 0 ? proj(N[i - 1], T[i]) : (proj(up, T[i]) || proj([0, 0, -1], T[i]) || [1, 0, 0]);
+      if (!nv) nv = [0, 1, 0];
+      N.push(nv);
+    }
+    var sm = opts.smooth || 0;
+    if (sm > 0) {
+      var N2 = [];
+      for (i = 0; i < NR; i++) { var sx = 0, sy = 0, sz = 0; for (var q = -sm; q <= sm; q++) { var nq = N[Math.max(0, Math.min(NR - 1, i + q))]; sx += nq[0]; sy += nq[1]; sz += nq[2]; } var l2 = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1; N2.push([sx / l2, sy / l2, sz / l2]); }
+      N = N2;
+    }
+    for (i = 0; i < NR; i++) {
+      var Tt = T[i], Nn = N[i], bx = Nn[1] * Tt[2] - Nn[2] * Tt[1], by = Nn[2] * Tt[0] - Nn[0] * Tt[2], bz = Nn[0] * Tt[1] - Nn[1] * Tt[0], bl = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
+      B.push([bx / bl, by / bl, bz / bl]);
+    }
+    var total = arc[NR - 1] || 1, dens = opts.density || 2.5;
+    var circ = 0; for (i = 0; i < NR; i++) circ += Math.PI * (rings[i].rx + (rings[i].ru + rings[i].rd) / 2);
+    circ /= NR;
+    var uRep = opts.uRepeat || Math.max(1, Math.round(circ * dens));
+    var capS = opts.capStart !== false, capE = opts.capEnd !== false;
+    var vcount = NR * (R + 1) + (capS ? 1 : 0) + (capE ? 1 : 0);
+    var pos = new Float32Array(vcount * 3), uvs = new Float32Array(vcount * 2), ind = [];
+    var seam = opts.seam || 0, disp = opts.displace, dv = _gv3;
+    for (i = 0; i < NR; i++) {
+      var rg = rings[i], Nn2 = N[i], Bb = B[i], e = 2 / rg.sq;
+      for (var j = 0; j <= R; j++) {
+        var th = j / R * Math.PI * 2 + seam, c = Math.cos(th), sn = Math.sin(th);
+        var cc = e === 1 ? c : (c < 0 ? -1 : 1) * Math.pow(Math.abs(c), e), ss = e === 1 ? sn : (sn < 0 ? -1 : 1) * Math.pow(Math.abs(sn), e);
+        var ry = cc > 0 ? rg.ru : rg.rd;
+        var vx = rg.x + Nn2[0] * cc * ry + Bb[0] * ss * rg.rx, vy = rg.y + Nn2[1] * cc * ry + Bb[1] * ss * rg.rx, vz = rg.z + Nn2[2] * cc * ry + Bb[2] * ss * rg.rx;
+        if (disp) { dv.set(vx, vy, vz); disp(dv, arc[i] / total, th, i, rg); vx = dv.x; vy = dv.y; vz = dv.z; }
+        var vi = i * (R + 1) + j;
+        pos[vi * 3] = vx; pos[vi * 3 + 1] = vy; pos[vi * 3 + 2] = vz;
+        var uu = j / R, vv = arc[i] / total;
+        if (opts.uRange) uu = opts.uRange[0] + (opts.uRange[1] - opts.uRange[0]) * uu; else uu *= uRep;
+        if (opts.vRange) vv = opts.vRange[0] + (opts.vRange[1] - opts.vRange[0]) * vv; else vv = arc[i] * dens;
+        uvs[vi * 2] = uu; uvs[vi * 2 + 1] = vv;
+      }
+    }
+    for (i = 0; i < NR - 1; i++) for (j = 0; j < R; j++) {
+      var a0 = i * (R + 1) + j, a1 = a0 + 1, b0 = a0 + R + 1, b1 = b0 + 1;
+      ind.push(a0, b0, a1, a1, b0, b1);
+    }
+    // winding check: outward = away from ring centre
+    var mid = Math.floor(NR / 2), qa = mid * (R + 1), qb = qa + R + 1;
+    if (NR > 1) {
+      _gv.set(pos[qb * 3] - pos[qa * 3], pos[qb * 3 + 1] - pos[qa * 3 + 1], pos[qb * 3 + 2] - pos[qa * 3 + 2]);
+      _gv2.set(pos[(qa + 1) * 3] - pos[qa * 3], pos[(qa + 1) * 3 + 1] - pos[qa * 3 + 1], pos[(qa + 1) * 3 + 2] - pos[qa * 3 + 2]);
+      _gv.cross(_gv2);
+      _gv4.set(pos[qa * 3] - rings[mid].x, pos[qa * 3 + 1] - rings[mid].y, pos[qa * 3 + 2] - rings[mid].z);
+      if (_gv.dot(_gv4) < 0) for (i = 0; i < ind.length; i += 3) { var tmp = ind[i + 1]; ind[i + 1] = ind[i + 2]; ind[i + 2] = tmp; }
+    }
+    var flip = NR > 1 && _gv.dot(_gv4) < 0;
+    var vbase = NR * (R + 1), bulge = opts.capBulge == null ? 0.25 : opts.capBulge;
+    function cap(ri, dir, vidx) {
+      var rg2 = rings[ri], rr = Math.min(rg2.rx, (rg2.ru + rg2.rd) / 2) * bulge, Tt2 = T[ri];
+      pos[vidx * 3] = rg2.x + Tt2[0] * rr * dir; pos[vidx * 3 + 1] = rg2.y + Tt2[1] * rr * dir; pos[vidx * 3 + 2] = rg2.z + Tt2[2] * rr * dir;
+      uvs[vidx * 2] = opts.uRange ? (opts.uRange[0] + opts.uRange[1]) / 2 : uRep / 2; uvs[vidx * 2 + 1] = uvs[(ri * (R + 1)) * 2 + 1];
+      for (var jj = 0; jj < R; jj++) {
+        var r0 = ri * (R + 1) + jj, r1 = r0 + 1;
+        // start cap faces -T, end cap faces +T: orientation relative to ring winding
+        if ((dir < 0) !== flip) ind.push(vidx, r0, r1); else ind.push(vidx, r1, r0);
+      }
+    }
+    var vi2 = vbase;
+    if (capS) { cap(0, -1, vi2); vi2++; }
+    if (capE) { cap(NR - 1, 1, vi2); vi2++; }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    g.setIndex(vcount > 65535 ? new THREE.Uint32BufferAttribute(ind, 1) : new THREE.Uint16BufferAttribute(ind, 1));
+    g.computeVertexNormals();
+    // weld the seam normals
+    var nm = g.attributes.normal;
+    for (i = 0; i < NR; i++) {
+      var s0 = i * (R + 1), s1 = s0 + R;
+      var ax = nm.getX(s0) + nm.getX(s1), ay = nm.getY(s0) + nm.getY(s1), az = nm.getZ(s0) + nm.getZ(s1), al = Math.sqrt(ax * ax + ay * ay + az * az) || 1;
+      nm.setXYZ(s0, ax / al, ay / al, az / al); nm.setXYZ(s1, ax / al, ay / al, az / al);
+    }
+    g.userData.rings = rings; g.userData.radial = R;
+    g.computeBoundingSphere();
+    return g;
+  };
+  /** Organic body from a spine of ellipsoid sections. sections: [{p:[x,y,z] | z,y, w (width), h | hUp,hDown, sq}] -> loft geometry */
+  G.organicBody = function (sections, opts) {
+    opts = opts || {};
+    var s = sections.map(function (q) {
+      var p = q.p || [q.x || 0, q.y, q.z];
+      var hu = q.hUp != null ? q.hUp : (q.h != null ? q.h / 2 : 0.1), hd = q.hDown != null ? q.hDown : (q.h != null ? q.h / 2 : hu);
+      return { p: p, rx: (q.w != null ? q.w / 2 : q.rx), ryUp: hu, ryDown: hd, sq: q.sq, n: q.n };
+    });
+    var o = {}; for (var k in opts) o[k] = opts[k];
+    if (o.radial == null) o.radial = 24; if (o.steps == null) o.steps = 4; if (o.smooth == null) o.smooth = 2; if (o.frame == null) o.frame = 'up';
+    return G.loft(s, o);
+  };
+  /** Tapered limb through joints [{p:[x,y,z], r | rx,rz}] (rx = side radius, rz = front/back radius). opts: loft opts (+bulge at joints) */
+  G.taperedLimb = function (joints, opts) {
+    opts = opts || {};
+    var s = joints.map(function (j) { return { p: j.p, rx: j.rx != null ? j.rx : j.r, ryUp: j.rz != null ? j.rz : j.r, ryDown: j.rzBack != null ? j.rzBack : (j.rz != null ? j.rz : j.r), sq: j.sq, n: j.n || opts.n || [0, 0, -1] }; });
+    var o = {}; for (var k in opts) o[k] = opts[k];
+    if (o.radial == null) o.radial = 12; if (o.steps == null) o.steps = 4; if (o.frame == null) o.frame = 'transport';
+    return G.loft(s, o);
+  };
+  /** Tapered tube along points with radii (array or fn(t)). opts: loft opts */
+  G.tube = function (points, radii, opts) {
+    opts = opts || {};
+    var s = points.map(function (p, i) { var t = points.length > 1 ? i / (points.length - 1) : 0, r = typeof radii === 'function' ? radii(t) : Array.isArray(radii) ? radii[Math.min(i, radii.length - 1)] : radii; return { p: p.isVector3 ? [p.x, p.y, p.z] : p, r: r, sq: opts.sq }; });
+    var o = {}; for (var k in opts) o[k] = opts[k];
+    if (o.radial == null) o.radial = 8; if (o.steps == null) o.steps = 3; if (o.frame == null) o.frame = 'transport';
+    return G.loft(s, o);
+  };
+  function curvePts(ctrl, n) {
+    var pts = ctrl.map(function (p) { return new THREE.Vector3(p[0], p[1], p[2]); });
+    if (pts.length < 2) return pts;
+    var cv = new THREE.CatmullRomCurve3(pts, false, 'centripetal'), out = [];
+    for (var i = 0; i <= n; i++) out.push(cv.getPoint(i / n));
+    return out;
+  }
+  G.curvePoints = curvePts;
+  /** Antler (one side, +x). spec: {base:[x,y,z], beam:[[x,y,z]...] (model-space control points after base), r:[r0, rTip],
+   *  tines:[{t (0..1 along beam), dir:[x,y,z], len, r, bend:[x,y,z]}], palm:{t0, t1, width, thick, points, pointLen}, burr:true, seg:16, radial:7}
+   *  side -1 mirrors to the left. Returns geometry with uv (u around, v along) + attribute-free (paint it). */
+  G.antler = function (spec, side) {
+    var seg = spec.seg || 16, rad = spec.radial || 7, geos = [];
+    var ctrl = [spec.base].concat(spec.beam), pts = curvePts(ctrl, seg), r0 = spec.r ? spec.r[0] : 0.022, r1 = spec.r ? spec.r[1] : 0.006;
+    var beamR = function (t) { var r = r0 + (r1 - r0) * Math.pow(t, 0.85); if (spec.burr !== false && t < 0.05) r *= 1 + (1 - t / 0.05) * 0.45; return r; };
+    geos.push(G.tube(pts, beamR, { radial: rad, steps: 2, density: 6, capStart: true, capEnd: true, capBulge: 0.6 }));
+    var beamCurve = new THREE.CatmullRomCurve3(ctrl.map(function (p) { return new THREE.Vector3(p[0], p[1], p[2]); }), false, 'centripetal');
+    (spec.tines || []).forEach(function (tn) {
+      var st = beamCurve.getPoint(tn.t), d = new THREE.Vector3(tn.dir[0], tn.dir[1], tn.dir[2]).normalize(), L = tn.len || 0.15;
+      var bend = tn.bend ? new THREE.Vector3(tn.bend[0], tn.bend[1], tn.bend[2]) : new THREE.Vector3();
+      var p1 = st.clone().addScaledVector(d, L * 0.5).addScaledVector(bend, 0.5), p2 = st.clone().addScaledVector(d, L).add(bend);
+      var p0 = st.clone().addScaledVector(d, -beamR(tn.t) * 0.6);
+      var tr = tn.r || beamR(tn.t) * 0.75;
+      geos.push(G.tube(curvePts([[p0.x, p0.y, p0.z], [st.x, st.y, st.z], [p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]], 8), function (t) { return tr * (1 - t * 0.88); }, { radial: Math.max(5, rad - 1), steps: 1, density: 6, capBulge: 0.9 }));
+    });
+    if (spec.palm) {
+      var P = spec.palm, ps = [], np = 8;
+      for (var i = 0; i <= np; i++) {
+        var t = P.t0 + (P.t1 - P.t0) * i / np, q = beamCurve.getPoint(t), wv = Math.sin(Math.PI * Math.min(1, i / np * 1.15)) * P.width;
+        ps.push({ p: [q.x, q.y, q.z], rx: Math.max(0.01, wv * 0.5), ry: P.thick || 0.02, n: P.normal || [0, 0, 1] });
+      }
+      var palm = G.loft(ps, { radial: 14, steps: 2, frame: 'up', up: P.normal || [0, 0, 1], density: 5 });
+      geos.push(palm);
+      var tipsN = P.points || 6;
+      for (var k = 0; k < tipsN; k++) {
+        var tt = P.t0 + (P.t1 - P.t0) * (0.1 + 0.85 * k / Math.max(1, tipsN - 1)), qq = beamCurve.getPoint(tt), tg = beamCurve.getTangent(tt);
+        var outD = new THREE.Vector3().crossVectors(tg, new THREE.Vector3(P.normal ? P.normal[0] : 0, P.normal ? P.normal[1] : 0, P.normal ? P.normal[2] : 1)).normalize();
+        if (outD.y < 0) outD.negate();
+        var ww = Math.sin(Math.PI * Math.min(1, (tt - P.t0) / (P.t1 - P.t0) * 1.15)) * P.width * 0.45, a = qq.clone().addScaledVector(outD, ww * 0.8), b = qq.clone().addScaledVector(outD, ww + (P.pointLen || 0.08));
+        geos.push(G.tube([[a.x, a.y, a.z], [b.x, b.y, b.z]], function (t) { return (P.thick || 0.02) * 1.1 * (1 - t * 0.85); }, { radial: 5, steps: 3, capBulge: 0.9 }));
+      }
+    }
+    var g = G.merge(geos);
+    if (side < 0) G.mirrorX(g);
+    return g;
+  };
+  /** Horn along a curling path. spec: {base:[x,y,z], dir:[x,y,z], up:[x,y,z] (curl axis normal), len, r0, r1, curl (rad), twist, ridges, ridgeDepth, seg, radial} */
+  G.horn = function (spec, side) {
+    var seg = spec.seg || 14, len = spec.len || 0.3, pts = [], d = new THREE.Vector3().fromArray(spec.dir || [0, 1, 0]).normalize();
+    var ax = new THREE.Vector3().fromArray(spec.axis || [0, 0, 1]).normalize(), p = new THREE.Vector3().fromArray(spec.base || [0, 0, 0]), q = new THREE.Quaternion();
+    var step = len / seg, curl = spec.curl || 0;
+    for (var i = 0; i <= seg; i++) { pts.push([p.x, p.y, p.z]); q.setFromAxisAngle(ax, curl / seg); d.applyQuaternion(q); if (spec.twist) { q.setFromAxisAngle(d, spec.twist / seg); ax.applyQuaternion(q); } p.addScaledVector(d, step); }
+    var r0 = spec.r0 || 0.04, r1 = spec.r1 || 0.004, ridges = spec.ridges || 0, rd = spec.ridgeDepth || 0.08;
+    var g = G.tube(pts, function (t) { var r = r0 + (r1 - r0) * Math.pow(t, spec.taper || 1); if (ridges) r *= 1 + Math.sin(t * ridges * Math.PI * 2) * rd * (1 - t); return r; }, { radial: spec.radial || 10, steps: 2, density: 5, capBulge: 0.9 });
+    if (side < 0) G.mirrorX(g);
+    return g;
+  };
+  /** Cloven hoof (sole at y=0, toe toward -z). o: {w, l, h, cloven:true} */
+  G.hoof = function (o) {
+    o = o || {};
+    var w = o.w || 0.05, l = o.l || 0.065, h = o.h || 0.055, geos = [];
+    var halves = o.cloven === false ? [0] : [-1, 1];
+    halves.forEach(function (sd) {
+      var hw = o.cloven === false ? w / 2 : w * 0.27, x = sd * w * 0.24;
+      geos.push(G.loft([
+        { p: [x, 0.002, 0], rx: hw * 1.02, ryUp: l * 0.5, ryDown: l * 0.5, sq: 2.6, n: [0, 0, -1] },
+        { p: [x, h * 0.5, l * 0.08], rx: hw * 0.95, ryUp: l * 0.42, ryDown: l * 0.4, sq: 2.4, n: [0, 0, -1] },
+        { p: [x * 0.8, h, l * 0.18], rx: hw * 0.8, ryUp: l * 0.3, ryDown: l * 0.32, sq: 2.2, n: [0, 0, -1] }
+      ], { radial: 10, steps: 2, frame: 'up', up: [0, 0, -1], capStart: true, capEnd: true, capBulge: 0.05, density: 8 }));
+    });
+    return G.merge(geos);
+  };
+  /** Paw (pad + toes + claws), centred, sole at y=0, toes toward -z. o: {size, toes:4, claw:0.4} */
+  G.paw = function (o) {
+    o = o || {};
+    var s = o.size || 0.06, geos = [], toes = o.toes || 4;
+    geos.push(G.organicBody([{ p: [0, s * 0.25, s * 0.35], w: s * 0.5, h: s * 0.3 }, { p: [0, s * 0.35, 0], w: s * 1.0, h: s * 0.6 }, { p: [0, s * 0.3, -s * 0.35], w: s * 0.95, h: s * 0.5 }, { p: [0, s * 0.2, -s * 0.55], w: s * 0.4, h: s * 0.25 }], { radial: 12, steps: 2, density: 10 }));
+    for (var i = 0; i < toes; i++) {
+      var a = (i / (toes - 1) - 0.5) * 1.6, x = Math.sin(a) * s * 0.42, z = -s * 0.45 - Math.cos(a) * s * 0.18;
+      var t = new THREE.SphereGeometry(s * 0.17, 8, 6); t.scale(1, 0.85, 1.2); t.translate(x, s * 0.16, z); geos.push(t);
+      if (o.claw !== 0) { var c = new THREE.ConeGeometry(s * 0.05, s * (o.claw || 0.4), 6); c.rotateX(-Math.PI / 2 - 0.4); c.translate(x, s * 0.12, z - s * 0.22); geos.push(c); }
+    }
+    return G.merge(geos);
+  };
+  /** Ear: cupped leaf shell from origin along +y, opening toward -z. o: {len, width, cup, thick, tip (0 round .. 1 pointed), segs}
+   *  vertices get uv.x = 0 back face / 1 front (inner) face (use it when painting). */
+  G.ear = function (o) {
+    o = o || {};
+    var L = o.len || 0.18, W = o.width || 0.08, cup = o.cup == null ? 0.35 : o.cup, th = o.thick || 0.006, tip = o.tip == null ? 0.5 : o.tip;
+    var nu = 8, nv = o.segs || 10, pos = [], uv = [], ind = [];
+    for (var face = 0; face < 2; face++) {
+      for (var j = 0; j <= nv; j++) {
+        var v = j / nv, wv = W * 0.5 * Math.pow(Math.sin(Math.PI * Math.min(1, 0.12 + v * 0.95)), 0.6 + tip) * (1 - v * 0.25);
+        for (var i = 0; i <= nu; i++) {
+          var u = i / nu * 2 - 1, x = u * wv, y = v * L, z = cup * wv * (1 - u * u) * 1.2;
+          var off = face === 0 ? th * (1 - v * 0.7) : 0;
+          pos.push(x, y, z + off); uv.push(face, v);
+        }
+      }
+    }
+    var row = nu + 1, half = (nv + 1) * row;
+    for (j = 0; j < nv; j++) for (i = 0; i < nu; i++) {
+      var a = j * row + i, b = a + 1, c = a + row, d = c + 1;
+      ind.push(a, c, b, b, c, d);
+      ind.push(half + a, half + b, half + c, half + b, half + d, half + c);
+    }
+    for (j = 0; j < nv; j++) { var l0 = j * row, l1 = l0 + row, r0 = j * row + nu, r1 = r0 + row; ind.push(l0, half + l0, l1, l1, half + l0, half + l1); ind.push(r0, r1, half + r0, r1, half + r1, half + r0); }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(ind);
+    g.computeVertexNormals();
+    return g;
+  };
+  /** Tail: tapered loft along a drooping curve from origin toward +z. o: {len, w, h, droop (rad), tipR, bushy} */
+  G.tail = function (o) {
+    o = o || {};
+    var L = o.len || 0.2, w = o.w || 0.06, h = o.h || 0.04, dr = o.droop == null ? 0.9 : o.droop, n = 6, s = [];
+    for (var i = 0; i <= n; i++) {
+      var t = i / n, a = dr * t, z = Math.sin(Math.PI / 2 - a * 0.5) * L * t, y = -Math.sin(a * 0.9) * L * t * 0.9;
+      var k = o.bushy ? Math.sin(Math.PI * Math.min(1, 0.25 + t * 0.85)) : (1 - t * 0.75);
+      s.push({ p: [0, y, z], rx: Math.max(0.004, w / 2 * k), ryUp: Math.max(0.004, h / 2 * k), ryDown: Math.max(0.004, h / 2 * k) });
+    }
+    return G.loft(s, { radial: 10, steps: 2, frame: 'up', density: 6, capBulge: 0.8 });
+  };
+  /** Beak / bill toward -z from origin. o: {len, w, h, hook (0..1), flat (duck bill)} */
+  G.beak = function (o) {
+    o = o || {};
+    var L = o.len || 0.05, w = o.w || 0.03, h = o.h || 0.025, hook = o.hook || 0, flat = !!o.flat, s = [];
+    for (var i = 0; i <= 5; i++) {
+      var t = i / 5, k = flat ? (1 - t * 0.25) : (1 - t * 0.92);
+      s.push({ p: [0, -hook * L * 0.6 * t * t * t, -L * t], rx: Math.max(0.002, w / 2 * (flat ? (1 - t * 0.1) : k)), ryUp: Math.max(0.0015, h / 2 * k * (flat ? 0.45 : 1)), ryDown: Math.max(0.0015, h / 2 * k * (flat ? 0.35 : 0.8)), sq: flat ? 2.8 : 2 });
+    }
+    return G.loft(s, { radial: 10, steps: 2, frame: 'up', density: 20, capBulge: flat ? 0.6 : 0.3 });
+  };
+  /** Feathered wing (spread pose) from shoulder at origin toward +x (side 1) or -x (side -1); trailing edge toward +z.
+   *  o: {span, chord, primaries:9, secondaries:8, arm:true} uv covers a feather card texture (TX.feather) per feather. */
+  G.wing = function (o, side) {
+    o = o || {};
+    var span = o.span || 0.5, chord = o.chord || 0.18, np = o.primaries || 9, ns = o.secondaries || 8, geos = [];
+    function feather(x0, z0, ang, len, wid, lift) {
+      var g = new THREE.PlaneGeometry(wid, len, 1, 2); g.rotateX(-Math.PI / 2); g.translate(0, 0, len / 2);
+      var p = g.attributes.position; for (var i = 0; i < p.count; i++) p.setY(i, p.getY(i) + Math.pow(p.getZ(i) / len, 2) * (lift || 0));
+      g.rotateY(-ang); g.translate(x0, 0, z0); geos.push(g);
+    }
+    for (var i = 0; i < ns; i++) { var t = i / ns; feather(span * (0.08 + t * 0.5), chord * 0.15, -0.05 - t * 0.15, chord * (0.95 - t * 0.1), chord * 0.32, -0.01); }
+    for (var j = 0; j < np; j++) { var t2 = j / (np - 1); feather(span * (0.6 + t2 * 0.32), chord * 0.1, -0.25 - t2 * 1.0, chord * (1.1 + 0.4 * Math.sin(t2 * 2.6)), chord * 0.28, 0.01); }
+    // coverts as a smooth leading arm
+    if (o.arm !== false) geos.push(G.taperedLimb([{ p: [0, 0, 0.02], r: chord * 0.18 }, { p: [span * 0.35, 0.005, 0.0], r: chord * 0.2 }, { p: [span * 0.62, 0, 0.02], r: chord * 0.12 }, { p: [span * 0.75, 0, 0.04], r: chord * 0.05 }], { radial: 8, n: [0, 1, 0], density: 6 }));
+    var g = G.merge(geos);
+    if (side < 0) G.mirrorX(g);
+    return g;
+  };
+  /** Tail fan (turkey display / grouse): feathers radiating up from origin in the XY plane, facing -z. o: {radius, feathers:16, spread (rad), width} */
+  G.fan = function (o) {
+    o = o || {};
+    var R = o.radius || 0.45, n = o.feathers || 16, sp = o.spread || Math.PI * 0.95, wd = o.width || R * 0.22, geos = [];
+    for (var i = 0; i < n; i++) {
+      var a = -sp / 2 + sp * i / (n - 1), g = new THREE.PlaneGeometry(wd, R, 1, 2);
+      g.translate(0, R / 2, 0); var p = g.attributes.position; for (var k = 0; k < p.count; k++) p.setZ(k, p.getZ(k) + Math.pow(p.getY(k) / R, 2) * R * 0.08 + i * 0.0006);
+      g.rotateZ(-a); geos.push(g);
+    }
+    return G.merge(geos);
+  };
+
+  /* ---------------- mesh buffer (fast builders for cards / foliage) ---------------- */
+  function MeshBuf() { this.pos = []; this.nor = []; this.uv = []; this.col = []; this.idx = []; this.n = 0; }
+  MeshBuf.prototype.v = function (x, y, z, nx, ny, nz, u, v, r, g, b) { this.pos.push(x, y, z); this.nor.push(nx, ny, nz); this.uv.push(u, v); this.col.push(r, g, b); return this.n++; };
+  MeshBuf.prototype.tri = function (a, b, c) { this.idx.push(a, b, c); };
+  MeshBuf.prototype.geometry = function () {
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
+    g.setIndex(this.n > 65535 ? new THREE.Uint32BufferAttribute(this.idx, 1) : new THREE.Uint16BufferAttribute(this.idx, 1));
+    g.computeBoundingSphere(); g.computeBoundingBox();
+    return g;
+  };
+  MeshBuf.prototype.add = function (geo, colorLin) {
+    // append an indexed/non-indexed geometry (position/normal/uv[/color])
+    var p = geo.attributes.position, n = geo.attributes.normal, uv = geo.attributes.uv, c = geo.attributes.color, base = this.n;
+    for (var i = 0; i < p.count; i++) this.v(p.getX(i), p.getY(i), p.getZ(i), n ? n.getX(i) : 0, n ? n.getY(i) : 1, n ? n.getZ(i) : 0, uv ? uv.getX(i) : 0, uv ? uv.getY(i) : 0, c ? c.getX(i) : (colorLin ? colorLin.r : 1), c ? c.getY(i) : (colorLin ? colorLin.g : 1), c ? c.getZ(i) : (colorLin ? colorLin.b : 1));
+    if (geo.index) for (var j = 0; j < geo.index.count; j++) this.idx.push(geo.index.array[j] + base); else for (var k = 0; k < p.count; k++) this.idx.push(base + k);
+  };
+  G.MeshBuf = MeshBuf;
+
+  /* ---------------- LOD ---------------- */
+  var lodList = [];
+  /** THREE.LOD from builders: highFn() / lowFn() -> Object3D; dist = switch distance (m) */
+  G.makeLOD = function (highFn, lowFn, dist) {
+    var lod = new THREE.LOD();
+    try { lod.addLevel(highFn(), 0); } catch (e) { console.error('[HG.gfx] makeLOD high', e); }
+    if (lowFn) { try { lod.addLevel(lowFn(), dist || 60); } catch (e2) { console.error('[HG.gfx] makeLOD low', e2); } }
+    return lod;
+  };
+  /** Geometry-swap LOD on ONE mesh (works for SkinnedMesh / InstancedMesh): geos [hi, lo, ...], dists [0, d1, ...] */
+  G.lodSwap = function (mesh, geos, dists) {
+    mesh.userData.lod = { geos: geos, dists: dists, cur: 0 };
+    mesh.userData.lodGeos = geos;
+    lodList.push(mesh);
+    return mesh;
+  };
+  var _lodP = new THREE.Vector3();
+  /** called by core ~5x per second */
+  G.updateLODs = function (camPos) {
+    for (var i = lodList.length - 1; i >= 0; i--) {
+      var m = lodList[i], L = m.userData.lod;
+      var o = m, attached = false; while (o) { if (o === HG.scene || o === HG.viewScene) { attached = true; break; } o = o.parent; }
+      if (!attached) { if (m.userData.lodDetachedT == null) m.userData.lodDetachedT = 0; if (++m.userData.lodDetachedT > 10) lodList.splice(i, 1); continue; }
+      m.userData.lodDetachedT = 0;
+      m.getWorldPosition(_lodP);
+      var d = _lodP.distanceTo(camPos), lvl = 0;
+      for (var k = 1; k < L.dists.length; k++) if (d > L.dists[k] * (L.cur >= k ? 0.92 : 1)) lvl = k;
+      if (lvl !== L.cur && L.geos[lvl]) { L.cur = lvl; m.geometry = L.geos[lvl]; }
+    }
+  };
+  G._lodList = lodList;
+  /* ---------------- rigs (bones) + skin binding ---------------- */
+  var RIG = G.rig = {};
+  /** Build a bone hierarchy. spec: {name, p:[x,y,z] MODEL-space joint position, children:[spec...]}
+   *  -> {root, bones:{name: Bone}, list:[Bone], index:{name: i}}. Bind pose has no rotations. */
+  RIG.build = function (spec) {
+    var rig = { bones: {}, list: [], index: {} };
+    (function mk(s, parent, pw) {
+      var b = new THREE.Bone(); b.name = s.name;
+      b.position.set(s.p[0] - pw[0], s.p[1] - pw[1], s.p[2] - pw[2]);
+      b.userData.rest = b.position.clone(); b.userData.model = s.p.slice();
+      if (parent) parent.add(b); else rig.root = b;
+      rig.index[s.name] = rig.list.length; rig.bones[s.name] = b; rig.list.push(b);
+      (s.children || []).forEach(function (c) { mk(c, b, s.p); });
+    })(spec, null, [0, 0, 0]);
+    return rig;
+  };
+  /** name -> bone index for a rig spec (same order as RIG.build) */
+  RIG.indexOf = function (spec) { var m = {}, n = 0; (function w(s) { m[s.name] = n++; (s.children || []).forEach(w); })(spec); return m; };
+  /** find a spec node by name */
+  RIG.find = function (spec, name) { var r = null; (function w(s) { if (s.name === name) r = s; else (s.children || []).forEach(w); })(spec); return r; };
+  var SK = G.skin = {};
+  function ensureSkin(g) {
+    var n = g.attributes.position.count;
+    if (!g.attributes.skinIndex) g.setAttribute('skinIndex', new THREE.BufferAttribute(new Float32Array(n * 4), 4));
+    if (!g.attributes.skinWeight) { var w = new Float32Array(n * 4); for (var i = 0; i < n; i++) w[i * 4] = 1; g.setAttribute('skinWeight', new THREE.BufferAttribute(w, 4)); }
+    return g;
+  }
+  /** every vertex -> one bone */
+  SK.rigid = function (g, bi) {
+    ensureSkin(g); var si = g.attributes.skinIndex.array, sw = g.attributes.skinWeight.array;
+    for (var i = 0; i < si.length; i += 4) { si[i] = bi; si[i + 1] = si[i + 2] = si[i + 3] = 0; sw[i] = 1; sw[i + 1] = sw[i + 2] = sw[i + 3] = 0; }
+    return g;
+  };
+  /** Chain binding: joints [[x,y,z]...] (n+1 points) define segments owned by bones [b0..bn-1] (indices).
+   *  Vertices near a joint blend with the neighbour bone over `blend` metres. */
+  SK.chain = function (g, joints, bones, blend) {
+    ensureSkin(g); blend = blend || 0.05;
+    var p = g.attributes.position, si = g.attributes.skinIndex.array, sw = g.attributes.skinWeight.array, segs = bones.length;
+    for (var i = 0; i < p.count; i++) {
+      var x = p.getX(i), y = p.getY(i), z = p.getZ(i), best = 1e9, bk = 0, bt = 0, bl = 1;
+      for (var k = 0; k < segs; k++) {
+        var a = joints[k], b = joints[k + 1], abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2], L2 = abx * abx + aby * aby + abz * abz || 1e-9;
+        var t = ((x - a[0]) * abx + (y - a[1]) * aby + (z - a[2]) * abz) / L2; t = t < 0 ? 0 : t > 1 ? 1 : t;
+        var qx = a[0] + abx * t - x, qy = a[1] + aby * t - y, qz = a[2] + abz * t - z, d2 = qx * qx + qy * qy + qz * qz;
+        if (d2 < best - 1e-9) { best = d2; bk = k; bt = t; bl = Math.sqrt(L2); }
+      }
+      var main = bones[bk], other = main, wo = 0, da = bt * bl, db = (1 - bt) * bl;
+      if (bk > 0 && da < blend) { other = bones[bk - 1]; wo = 0.5 * sstep(1 - da / blend); }
+      else if (bk < segs - 1 && db < blend) { other = bones[bk + 1]; wo = 0.5 * sstep(1 - db / blend); }
+      if (other === main) wo = 0;
+      si[i * 4] = main; si[i * 4 + 1] = other; si[i * 4 + 2] = 0; si[i * 4 + 3] = 0;
+      sw[i * 4] = 1 - wo; sw[i * 4 + 1] = wo; sw[i * 4 + 2] = 0; sw[i * 4 + 3] = 0;
+    }
+    return g;
+  };
+  /** generic: fn(x,y,z, outIdx[4], outW[4]) */
+  SK.fn = function (g, fn) {
+    ensureSkin(g); var p = g.attributes.position, si = g.attributes.skinIndex.array, sw = g.attributes.skinWeight.array, oi = [0, 0, 0, 0], ow = [1, 0, 0, 0];
+    for (var i = 0; i < p.count; i++) { oi[0] = oi[1] = oi[2] = oi[3] = 0; ow[0] = 1; ow[1] = ow[2] = ow[3] = 0; fn(p.getX(i), p.getY(i), p.getZ(i), oi, ow); for (var k = 0; k < 4; k++) { si[i * 4 + k] = oi[k]; sw[i * 4 + k] = ow[k]; } }
+    return g;
+  };
+  /** SkinnedMesh from a geometry + rig (bind pose = rest). Root bone is added under the mesh. */
+  RIG.skinnedMesh = function (geo, material, rig) {
+    var m = new THREE.SkinnedMesh(geo, material);
+    m.add(rig.root);
+    m.bind(new THREE.Skeleton(rig.list));
+    return m;
+  };
+
+  /* ---------------- gaits ---------------- */
+  /** leg phase offsets [FL, FR, BL, BR] (fraction of a cycle), duty factor (stance fraction), stride (m per cycle at leg length 0.9 m) */
+  var GAITS = G.gaits = {
+    walk: { off: [0.25, 0.75, 0.0, 0.5], duty: 0.64, stride: 1.4, lift: 0.75, bob: 0.010, bobN: 2, pitch: 0.012, flex: 0.0, nod: 0.06 },
+    trot: { off: [0.0, 0.5, 0.5, 0.0], duty: 0.46, stride: 2.3, lift: 0.95, bob: 0.024, bobN: 2, pitch: 0.012, flex: 0.02, nod: 0.03 },
+    gallop: { off: [0.58, 0.68, 0.0, 0.1], duty: 0.34, stride: 4.4, lift: 1.15, bob: 0.055, bobN: 1, pitch: 0.075, flex: 0.13, nod: 0.08 },
+    bound: { off: [0.5, 0.55, 0.0, 0.05], duty: 0.28, stride: 5.0, lift: 1.25, bob: 0.12, bobN: 1, pitch: 0.13, flex: 0.22, nod: 0.06 },
+    hop: { off: [0.08, 0.14, 0.6, 0.6], duty: 0.4, stride: 1.0, lift: 1.0, bob: 0.11, bobN: 1, pitch: 0.2, flex: 0.18, nod: 0.05, hop: true },
+    waddle: { off: [0, 0.5, 0, 0.5], duty: 0.6, stride: 0.5, lift: 0.8, bob: 0.01, bobN: 2, pitch: 0, flex: 0, nod: 0.12, roll: 0.07 },
+    fly: { off: [0, 0, 0, 0], duty: 1, stride: 6, lift: 0, bob: 0, bobN: 1, pitch: 0, flex: 0, nod: 0, flap: true }
+  };
+  var ANIM = G.anim = {};
+  var LEGS = ['FL', 'FR', 'BL', 'BR'], _lp = [0, 0, 0], TAU2 = Math.PI * 2;
+  function dampV(a, b, l, dt) { return b + (a - b) * Math.exp(-l * dt); }
+  /** unit leg cycle: out[0] hip (+1 forward .. -1 back), out[1] swing flex 0..1, out[2] stance load 0..1 */
+  function legPose(p, duty, out) {
+    if (p < duty) { var s = p / duty; out[0] = 1 - 2 * s; out[1] = 0; out[2] = Math.sin(Math.PI * s); }
+    else { var s2 = (p - duty) / (1 - duty), e = s2 * s2 * (3 - 2 * s2); out[0] = -1 + 2 * e; out[1] = Math.sin(Math.PI * Math.min(1, s2 * 1.12)); out[2] = 0; }
+    return out;
+  }
+  G.legPose = legPose;
+  function newAnimState() {
+    return { phase: Math.random(), w0: 1, w1: 0, w2: 0, n1: 0, n2: 0, h: 0, look: 0, lookT: Math.random() * 3, lookTarget: 0, earT: Math.random() * 3, earK: 0, earSide: 0, earA: 0,
+      tail: 0, slope: 0, dead: false, dv: 0, swish: 0, swishT: 2 + Math.random() * 4, chew: 0, blinkT: 0 };
+  }
+  G.newAnimState = newAnimState;
+  function terrainSlope(a, len) {
+    if (!HG.terrain || !HG.terrain.ready) return 0;
+    var fx = -Math.sin(a.yaw) * len * 0.5, fz = -Math.cos(a.yaw) * len * 0.5;
+    var hf = HG.terrain.heightAt(a.pos.x + fx, a.pos.z + fz), hb = HG.terrain.heightAt(a.pos.x - fx, a.pos.z - fz);
+    return U.clamp(Math.atan2(hf - hb, len), -0.45, 0.45);
+  }
+  /** Quadruped animator (a.parts.animate). Drives the named bones from a.speed + a.state:
+   *  gait blend (cfg.gaits by cfg.speeds), leg cycles, body bob/pitch/spine flex, head pose (graze/alert/run), look-around,
+   *  ear flicks, tail swish + flag, breathing, slope alignment. */
+  ANIM.quadruped = function (a, dt) {
+    var P = a.parts, B = P.rig.bones, C = P.cfg, S = P.state, t = HG.time + a.id * 1.37;
+    var sp = a.speed / Math.max(0.2, a.scale);
+    var s1 = C.speeds[0], s2 = C.speeds[1];
+    var k1 = U.smooth(s1 - 0.45, s1 + 0.45, sp), k2 = U.smooth(s2 - 0.8, s2 + 0.8, sp);
+    var g2 = k2, g1 = k1 * (1 - k2), g0 = 1 - g1 - g2;
+    S.w0 = dampV(S.w0, g0, 7, dt); S.w1 = dampV(S.w1, g1, 7, dt); S.w2 = dampV(S.w2, g2, 7, dt);
+    var tot = S.w0 + S.w1 + S.w2 || 1, W0 = S.w0 / tot, W1 = S.w1 / tot, W2 = S.w2 / tot;
+    var GA0 = GAITS[C.gaits[0]], GA1 = GAITS[C.gaits[1]], GA2 = GAITS[C.gaits[2]];
+    var stride = (W0 * GA0.stride + W1 * GA1.stride + W2 * GA2.stride) * C.strideK;
+    S.phase = (S.phase + dt * sp / Math.max(0.12, stride)) % 1;
+    var move = U.clamp(sp / 0.3, 0, 1), ph = S.phase;
+    var FF = C.flexF, FH = C.flexH;
+    for (var l = 0; l < 4; l++) {
+      var hip = 0, flex = 0, load = 0, front = l < 2;
+      for (var gi = 0; gi < 3; gi++) {
+        var w = gi === 0 ? W0 : gi === 1 ? W1 : W2; if (w < 0.002) continue;
+        var GG = gi === 0 ? GA0 : gi === 1 ? GA1 : GA2;
+        legPose((ph + GG.off[l]) % 1, GG.duty, _lp);
+        var A = Math.asin(Math.min(0.9, GG.duty * GG.stride * C.strideK / (2 * C.legLen))) * (front ? C.swingF : C.swingH);
+        if (GG.hop && !front) { hip += w * (_lp[2] > 0 ? -_lp[2] * A * 1.3 : _lp[0] * A * 0.5); flex += w * (_lp[2] > 0 ? -_lp[2] * 0.9 : _lp[1] * 0.5); }
+        else { hip += w * _lp[0] * A; flex += w * _lp[1] * GG.lift; }
+        load += w * _lp[2];
+      }
+      hip *= move; flex *= move; load *= move;
+      var id = LEGS[l], F = front ? FF : FH;
+      B[id + '_hip'].rotation.x = hip;
+      B[id + '_knee'].rotation.x = flex * F[0] + (front ? 0 : load * 0.12);
+      B[id + '_hock'].rotation.x = flex * F[1] - (front ? 0 : load * 0.1);
+      B[id + '_hoof'].rotation.x = flex * F[2] + load * (front ? 0.18 : 0.12);
+    }
+    // body motion
+    var bob = 0, pitch = 0, flexS = 0, nod = 0, roll = 0;
+    for (var g = 0; g < 3; g++) {
+      var ww = g === 0 ? W0 : g === 1 ? W1 : W2; if (ww < 0.002) continue;
+      var Gd = g === 0 ? GA0 : g === 1 ? GA1 : GA2, a2 = ph * TAU2;
+      bob += ww * Gd.bob * Math.cos(a2 * Gd.bobN); pitch += ww * Gd.pitch * Math.sin(a2); flexS += ww * Gd.flex * Math.sin(a2 + 0.6);
+      nod += ww * Gd.nod * Math.sin(a2 * 2 + 0.8); if (Gd.roll) roll += ww * Gd.roll * Math.sin(a2);
+    }
+    var breathe = Math.sin(t * (S.tail > 0.5 ? 4.5 : 1.6)) * (1 - move * 0.5);
+    B.pelvis.position.y = B.pelvis.userData.rest.y + bob * move * C.legLen;
+    S.slope = dampV(S.slope, terrainSlope(a, C.bodyLen), 5, dt);
+    B.root.rotation.x = S.slope + pitch * move;
+    B.root.rotation.z = roll * move;
+    B.spine.rotation.x = flexS * move * 0.5 + breathe * 0.006;
+    B.chest.rotation.x = -flexS * move * 0.6 - breathe * 0.004;
+    // head & neck pose by state
+    var st = a.state, pose;
+    if (st === 'graze') pose = C.poses.graze;
+    else if (st === 'alert' || st === 'warn') pose = C.poses.alert;
+    else if (st === 'flee' || st === 'charge') pose = sp > s2 ? C.poses.run : C.poses.walk;
+    else if (move > 0.3) pose = C.poses.walk;
+    else pose = C.poses.idle;
+    var hr = st === 'graze' ? 2.2 : 4;
+    S.n1 = dampV(S.n1, pose[0], hr, dt); S.n2 = dampV(S.n2, pose[1], hr, dt); S.h = dampV(S.h, pose[2], hr, dt);
+    S.lookT -= dt;
+    if (st === 'alert' || st === 'warn') S.lookTarget = U.clamp(U.angleDiff(a.yaw, U.yawTo(a.pos.x, a.pos.z, a.threat.x, a.threat.z)), -1.1, 1.1);
+    else if (move > 0.5 || st === 'graze') { S.lookTarget = st === 'graze' ? Math.sin(t * 0.3) * 0.25 : 0; }
+    else if (S.lookT <= 0) { S.lookT = 1.2 + Math.random() * 4; S.lookTarget = Math.random() < 0.35 ? 0 : (Math.random() - 0.5) * 1.5; }
+    S.look = dampV(S.look, S.lookTarget, 3, dt);
+    var chew = st === 'graze' ? Math.sin(t * 5.5) * 0.035 + Math.max(0, Math.sin(t * 0.7)) * 0.12 : 0;
+    B.neck1.rotation.x = S.n1 + nod * move + breathe * 0.004; B.neck1.rotation.y = S.look * 0.4;
+    B.neck2.rotation.x = S.n2 + nod * move * 0.4; B.neck2.rotation.y = S.look * 0.35;
+    B.head.rotation.x = S.h - nod * move * 0.7 + chew; B.head.rotation.y = S.look * 0.3; B.head.rotation.z = -S.look * 0.12;
+    // ears: flicks + alert forward
+    S.earT -= dt;
+    if (S.earT < 0) { S.earT = 1 + Math.random() * 5; S.earSide = Math.random() < 0.5 ? 0 : 1; S.earK = 1; }
+    S.earK = Math.max(0, S.earK - dt * 4.5);
+    S.earA = dampV(S.earA, (st === 'alert' || st === 'warn') ? 1 : (st === 'flee' ? -0.6 : 0), 5, dt);
+    var flick = Math.sin(S.earK * Math.PI) * 0.6;
+    if (B.earR) { B.earR.rotation.x = -S.earA * C.earFwd; B.earR.rotation.z = (S.earSide === 0 ? flick : 0) - S.earA * 0.1; B.earR.rotation.y = S.earSide === 0 ? -flick * 0.4 : 0; }
+    if (B.earL) { B.earL.rotation.x = -S.earA * C.earFwd; B.earL.rotation.z = -(S.earSide === 1 ? flick : 0) + S.earA * 0.1; B.earL.rotation.y = S.earSide === 1 ? flick * 0.4 : 0; }
+    // tail: flag when fleeing/alarmed, swish when calm
+    var flag = st === 'flee' ? 1 : ((st === 'alert' || st === 'warn') && a.awareness > 0.75 ? 0.55 : 0);
+    S.tail = dampV(S.tail, flag * C.tailFlag, 7, dt);
+    S.swishT -= dt; if (S.swishT < 0) { S.swishT = 2 + Math.random() * 6; S.swish = 1; }
+    S.swish = Math.max(0, S.swish - dt * 1.6);
+    if (B.tail1) {
+      B.tail1.rotation.x = -S.tail * C.tailLift + Math.sin(t * 7) * 0.05 * S.tail;
+      B.tail1.rotation.z = Math.sin(t * 9) * 0.35 * S.swish * (1 - S.tail) + Math.sin(t * 2) * 0.04;
+      if (B.tail2) B.tail2.rotation.x = -S.tail * C.tailLift * 0.4;
+    }
+  };
+  /** Natural collapse (no gore): stumble forward, front legs buckle, hind fold, roll onto the side, legs relax. */
+  ANIM.collapse = function (a, dt) {
+    var P = a.parts, B = P.rig.bones, C = P.cfg, S = P.state, t = a.deadT;
+    if (!S.dead) { S.dead = true; S.dv = Math.min(9, a.deathSpeed || 0) * 0.6; S.y0 = a.pos.y; }
+    if (S.dv > 0.03) { a.pos.x -= Math.sin(a.yaw) * S.dv * dt; a.pos.z -= Math.cos(a.yaw) * S.dv * dt; S.dv = dampV(S.dv, 0, 2.6, dt); }
+    var k1 = U.smooth(0, 0.32, t), k2 = U.smooth(0.15, 0.75, t), k3 = U.smooth(0.45, 1.25, t), rl = U.smooth(0.9, 1.9, t);
+    var fold = 1 - rl * 0.85;
+    for (var l = 0; l < 4; l++) {
+      var id = LEGS[l], front = l < 2, side = (l % 2 === 0) ? 1 : -1, k = front ? k1 : k2;
+      B[id + '_hip'].rotation.x = front ? (0.35 * k * fold + 0.35 * rl) : (-0.25 * k * fold - 0.35 * rl);
+      B[id + '_hip'].rotation.z = side * a.tipDir * 0.12 * rl;
+      B[id + '_knee'].rotation.x = front ? 0.55 * k * fold + 0.1 * rl : -0.9 * k * fold - 0.15 * rl;
+      B[id + '_hock'].rotation.x = front ? -1.7 * k * fold - 0.2 * rl : 1.5 * k * fold + 0.25 * rl;
+      B[id + '_hoof'].rotation.x = front ? -0.5 * k : -0.4 * k;
+    }
+    var drop = C.bellyH * 0.82 * Math.max(k1 * 0.45, k2) * (1 - rl * 0.35);
+    B.pelvis.position.y = B.pelvis.userData.rest.y - drop;
+    B.root.rotation.x = -0.22 * k1 * (1 - k2 * 0.8);
+    B.root.rotation.z = 0;
+    B.spine.rotation.x = 0; B.chest.rotation.x = 0.05 * k2;
+    S.n1 = dampV(S.n1, -0.55 * k1 - 0.15 * rl, 4, dt); S.n2 = dampV(S.n2, -0.25, 4, dt); S.h = dampV(S.h, 0.3 * rl, 3, dt);
+    B.neck1.rotation.x = S.n1; B.neck1.rotation.y = 0.2 * rl * -a.tipDir; B.neck2.rotation.x = S.n2; B.head.rotation.x = S.h; B.head.rotation.y = 0;
+    if (B.earR) { B.earR.rotation.set(0.3 * rl, 0, 0.25 * rl); } if (B.earL) { B.earL.rotation.set(0.3 * rl, 0, -0.25 * rl); }
+    if (B.tail1) { B.tail1.rotation.x = dampV(B.tail1.rotation.x, 0, 3, dt); B.tail1.rotation.z = 0; }
+    var phi = 1.38 * k3, bodyH = C.bodyY - drop;
+    a.root.rotation.z = a.tipDir * phi;
+    var ground = HG.terrain && HG.terrain.ready ? HG.terrain.heightAt(a.pos.x, a.pos.z) : 0;
+    a.pos.y = ground + (C.halfW * a.scale - bodyH * a.scale * Math.cos(phi)) * Math.sin(phi);
+    return true;
+  };
+
+  /* ---------------- quadruped assembler ---------------- */
+  var tplCache = {};
+  function mirrorPts(L) { return L.map(function (j) { var c = {}; for (var k in j) c[k] = j[k]; c.p = [-j.p[0], j.p[1], j.p[2]]; return c; }); }
+  /** Build (and cache) a skinned quadruped template from a spec. See API.md §6b for the full spec format.
+   *  spec: {key, spine:[{p,w,hUp,hDown,sq,bone}], head:[{p,w,hUp,hDown,sq}], legs:{FR:[6 joints], BR:[6 joints]},
+   *         hoof:{w,l,h}|paw:{size}|feet:false, ears:{p,len,width,cup,tip,rot}, tail:{p,len,w,h,droop,bushy},
+   *         eyes:{p,r,color}, nose:{p,r}, coat(c,x,y,z,nx,ny,nz,part,u,v), fur:{texture opts}, roughness,
+   *         attach(spec)->[{bone, geometry (model space), material, lowGeometry}], gaits:['walk','trot','gallop'], speeds:[2,4.5],
+   *         poses:{idle,walk,run,alert,graze:[neck1,neck2,head]}, earFwd, tailLift, tailFlag, flexF, flexH, swingF, swingH, lodDist, density, ao} */
+  G.quadruped = function (spec) {
+    var key = spec.key || ('q' + Math.random());
+    if (tplCache[key]) return tplCache[key];
+    var legs = { FR: spec.legs.FR, BR: spec.legs.BR, FL: spec.legs.FL || mirrorPts(spec.legs.FR), BL: spec.legs.BL || mirrorPts(spec.legs.BR) };
+    // ---- rig spec ----
+    var marks = {};
+    spec.spine.forEach(function (s) { if (s.bone) marks[s.bone] = s.p; });
+    var last = spec.spine[spec.spine.length - 1].p;
+    if (!marks.head) marks.head = last;
+    ['pelvis', 'spine', 'chest', 'neck1', 'neck2'].forEach(function (n, i) { if (!marks[n]) console.warn('[HG.gfx] quadruped ' + key + ' missing spine bone ' + n); });
+    function mk(name, p, kids) { return { name: name, p: p, children: kids || [] }; }
+    function legChain(id) { var L = legs[id]; return mk(id + '_hip', L[1].p, [mk(id + '_knee', L[2].p, [mk(id + '_hock', L[3].p, [mk(id + '_hoof', L[4].p)])])]); }
+    var ears = spec.ears, earP = ears ? ears.p : null;
+    var headKids = []; if (ears) { headKids.push(mk('earR', earP)); headKids.push(mk('earL', [-earP[0], earP[1], earP[2]])); }
+    var head = mk('head', marks.head, headKids);
+    var tl = spec.tail, tailKids = [];
+    if (tl) { var tdr = tl.droop == null ? 0.9 : tl.droop, tL = tl.len || 0.2; tailKids.push(mk('tail1', tl.p, [mk('tail2', [tl.p[0], tl.p[1] - Math.sin(tdr * 0.5) * tL * 0.45, tl.p[2] + Math.cos(tdr * 0.5) * tL * 0.45])])); }
+    var rigSpec = mk('root', [0, 0, 0], [mk('pelvis', marks.pelvis, [mk('spine', marks.spine, [mk('chest', marks.chest, [mk('neck1', marks.neck1, [mk('neck2', marks.neck2, [head])]), legChain('FL'), legChain('FR')])]), legChain('BL'), legChain('BR')].concat(tailKids))]);
+    var BI = RIG.indexOf(rigSpec);
+    // ---- materials ----
+    var furTex = spec.texture || TX.furDetail(spec.fur || {});
+    var hi = !G.isLow();
+    var matOpts = { map: furTex, vertexColors: true, skinning: true, roughness: spec.roughness == null ? 0.88 : spec.roughness, key: 'q:' + key };
+    if (hi && spec.normal !== false) { matOpts.normalMap = TX.normalOf(furTex, spec.normalStrength || 2.2); matOpts.normalScale = spec.normalScale || 0.6; }
+    // ---- geometry at two resolutions ----
+    function build(lo) {
+      var R = function (n) { return Math.max(5, Math.round(n * (lo ? 0.42 : 1))); }, Sx = lo ? 2 : 4, parts = [], dens = spec.density || 2.4;
+      function paint(g, part) { if (spec.coat) G.paint(g, function (c, x, y, z, nx, ny, nz, u, v) { return spec.coat(c, x, y, z, nx, ny, nz, part, u, v); }, { gain: spec.coatGain || 1.12 }); else ensureColor(g); return g; }
+      // body + neck
+      var body = G.organicBody(spec.spine, { radial: R(spec.radial || 28), steps: Sx, smooth: 2, density: dens });
+      paint(body, 'body');
+      var jp = [spec.spine[0].p], jb = [];
+      var order = ['pelvis', 'spine', 'chest', 'neck1', 'neck2', 'head'];
+      order.forEach(function (n) { jp.push(marks[n]); });
+      var hp = marks.head, n2 = marks.neck2; jp.push([hp[0] + (hp[0] - n2[0]) * 0.4, hp[1] + (hp[1] - n2[1]) * 0.4, hp[2] + (hp[2] - n2[2]) * 0.4]);
+      jb = [BI.pelvis, BI.pelvis, BI.spine, BI.chest, BI.neck1, BI.neck2, BI.head];
+      SK.chain(body, jp, jb, spec.blend || 0.12);
+      parts.push(body);
+      // head
+      if (spec.head) { var hd = G.organicBody(spec.head, { radial: R(22), steps: Sx, smooth: 1, density: dens * 1.4, capBulge: 0.5 }); paint(hd, 'head'); SK.rigid(hd, BI.head); parts.push(hd); }
+      // legs
+      LEGS.forEach(function (id) {
+        var L = legs[id], front = id.charAt(0) === 'F';
+        var lg = G.taperedLimb(L, { radial: R(12), steps: Sx, density: dens * 1.3, capStart: false, n: [0, 0, -1], capBulge: 0.3 });
+        paint(lg, front ? 'legF' : 'legH');
+        SK.chain(lg, L.map(function (j) { return j.p; }), [front ? BI.chest : BI.pelvis, BI[id + '_hip'], BI[id + '_knee'], BI[id + '_hock'], BI[id + '_hoof']], spec.legBlend || 0.05);
+        parts.push(lg);
+        var gp = L[L.length - 1].p;
+        if (spec.hoof) { var hf = G.hoof(spec.hoof); G.xform(hf, [gp[0], 0, gp[2]], [0, 0, 0]); paint(hf, 'hoof'); SK.rigid(hf, BI[id + '_hoof']); parts.push(hf); }
+        else if (spec.paw) { var pw = G.paw(spec.paw); G.xform(pw, [gp[0], 0, gp[2]]); paint(pw, 'paw'); SK.rigid(pw, BI[id + '_hoof']); parts.push(pw); }
+      });
+      // ears
+      if (ears) [1, -1].forEach(function (sd) {
+        var e = G.ear(ears); var r = ears.rot || [0.25, 0, -0.8];
+        G.xform(e, [0, 0, 0], [r[0], sd * (r[1] || 0), sd * r[2]]); G.xform(e, [sd * earP[0], earP[1], earP[2]]);
+        paint(e, 'ear'); SK.rigid(e, sd > 0 ? BI.earR : BI.earL); parts.push(e);
+      });
+      // tail
+      if (tl) {
+        var tg = G.tail(tl); G.xform(tg, tl.p); paint(tg, 'tail');
+        var tdr2 = tl.droop == null ? 0.9 : tl.droop, tL2 = tl.len || 0.2, tm = [tl.p[0], tl.p[1] - Math.sin(tdr2 * 0.5) * tL2 * 0.45, tl.p[2] + Math.cos(tdr2 * 0.5) * tL2 * 0.45];
+        SK.chain(tg, [tl.p, tm, [tl.p[0], tl.p[1] - Math.sin(tdr2) * tL2, tl.p[2] + Math.cos(tdr2) * tL2]], [BI.tail1, BI.tail2], 0.04);
+        parts.push(tg);
+      }
+      var g = G.merge(parts);
+      // ambient occlusion from body sections + limb joints + ground
+      var occ = [];
+      spec.spine.forEach(function (s) { occ.push([s.p[0], s.p[1], s.p[2], Math.min(s.w / 2, ((s.hUp || 0.1) + (s.hDown || 0.1)) / 2) * 0.95]); });
+      LEGS.forEach(function (id) { legs[id].forEach(function (j, i) { if (i > 0) occ.push([j.p[0], j.p[1], j.p[2], (j.rx || j.r) * 0.9]); }); });
+      G.vertexAO(g, { occluders: occ, ground: 0, groundStrength: 0.4, groundFalloff: 0.25, strength: spec.ao == null ? 0.9 : spec.ao, under: 0.3, min: 0.4 });
+      g.computeBoundingSphere(); g.boundingSphere.radius *= 1.25;
+      g.userData.shared = true;
+      return g;
+    }
+    var geoHi = build(false), geoLo = build(true);
+    // attachments (eyes, nose, antlers ...) rigid on bones; geometry given in model space
+    var attach = [];
+    function boneLocal(geo, bone) { var bp = RIG.find(rigSpec, bone).p; geo.translate(-bp[0], -bp[1], -bp[2]); geo.userData.shared = true; return geo; }
+    var gloss = [];
+    if (spec.eyes) [1, -1].forEach(function (sd) {
+      var e = new THREE.SphereGeometry(spec.eyes.r || 0.015, 14, 10); e.scale(0.8, 0.85, 1);
+      if (spec.eyes.rot) G.xform(e, null, [0, sd * spec.eyes.rot, 0]);
+      G.xform(e, [sd * spec.eyes.p[0], spec.eyes.p[1], spec.eyes.p[2]]); G.tint(e, spec.eyes.color || '#140d08'); gloss.push(e);
+    });
+    if (spec.nose) { var nz = new THREE.SphereGeometry(spec.nose.r || 0.02, 14, 10); nz.scale(spec.nose.sx || 1.25, spec.nose.sy || 0.8, spec.nose.sz || 0.7); G.xform(nz, spec.nose.p); G.tint(nz, spec.nose.color || '#141010'); gloss.push(nz); }
+    if (gloss.length) attach.push({ bone: 'head', geos: [boneLocal(G.merge(gloss), 'head')], material: G.mat({ vertexColors: true, roughness: 0.18, key: 'q:gloss' }), shadow: false, hideFar: 45 });
+    if (spec.attach) (spec.attach(spec) || []).forEach(function (at) {
+      var gs = [boneLocal(at.geometry, at.bone)]; if (at.lowGeometry) gs.push(boneLocal(at.lowGeometry, at.bone));
+      attach.push({ bone: at.bone, geos: gs, material: at.material, shadow: at.shadow !== false, variant: at.variant });
+    });
+    var legLen = (legs.FR[1].p[1] + legs.BR[1].p[1]) / 2;
+    var chestS = spec.spine.reduce(function (m, s) { return s.w > m.w ? s : m; }, spec.spine[0]);
+    var cfg = {
+      gaits: spec.gaits || ['walk', 'trot', 'gallop'], speeds: spec.speeds || [2.0, 4.6], strideK: spec.strideK || legLen / 0.9 * (spec.strideMul || 1), legLen: legLen,
+      bodyLen: Math.abs(spec.spine[0].p[2] - marks.chest[2]) + 0.3, bodyY: marks.pelvis[1], halfW: chestS.w / 2, bellyH: chestS.p[1] - (chestS.hDown || 0.1),
+      poses: spec.poses || { idle: [0, 0, 0], walk: [-0.15, 0, 0.05], run: [-0.35, 0.05, 0.2], alert: [0.2, 0.05, -0.1], graze: [-1.1, -0.3, 0.55] },
+      earFwd: spec.earFwd == null ? 0.35 : spec.earFwd, tailLift: spec.tailLift == null ? 1.8 : spec.tailLift, tailFlag: spec.tailFlag == null ? 1 : spec.tailFlag,
+      flexF: spec.flexF || [0.45, -1.5, -0.9], flexH: spec.flexH || [-0.6, 1.25, -0.8], swingF: spec.swingF || 0.85, swingH: spec.swingH || 1
+    };
+    var tpl = { key: key, rigSpec: rigSpec, boneIndex: BI, geos: [geoHi, geoLo], matOpts: matOpts, attach: attach, cfg: cfg, lodDist: spec.lodDist || 42, spec: spec };
+    tplCache[key] = tpl;
+    return tpl;
+  };
+  G.templates = tplCache;
+  /** Instance a template -> parts for buildMesh: {root, mesh, rig, legs, head, tail, cfg, state, animate, die}.
+   *  opts: {tint: '#ffffff' (coat multiplier), variant (attachment filter), noAttach:[bone names]} */
+  G.spawnQuadruped = function (tpl, opts) {
+    opts = opts || {};
+    var root = new THREE.Group();
+    var rig = RIG.build(tpl.rigSpec);
+    var mo = {}; for (var k in tpl.matOpts) mo[k] = tpl.matOpts[k];
+    if (opts.tint) { mo.color = opts.tint; mo.key = tpl.matOpts.key + ':' + opts.tint; }
+    var mesh = RIG.skinnedMesh(tpl.geos[0], G.mat(mo), rig);
+    mesh.name = tpl.key;
+    root.add(mesh);
+    var lodD = tpl.lodDist * (G.isLow() ? 0.7 : 1);
+    G.lodSwap(mesh, tpl.geos, [0, lodD]);
+    var extras = [];
+    tpl.attach.forEach(function (at) {
+      if (at.variant != null && opts.variant != null && at.variant !== opts.variant) return;
+      if (at.variant != null && opts.variant == null) return;
+      var m = new THREE.Mesh(at.geos[0], at.material); m.castShadow = at.shadow;
+      rig.bones[at.bone].add(m); extras.push(m);
+      if (at.geos[1]) G.lodSwap(m, at.geos, [0, lodD]);
+      if (at.hideFar) { m.userData.hideFar = at.hideFar; }
+    });
+    var B = rig.bones;
+    return {
+      root: root, mesh: mesh, rig: rig, extras: extras, cfg: tpl.cfg, state: newAnimState(), template: tpl,
+      legs: [B.FL_hip, B.FR_hip, B.BL_hip, B.BR_hip], head: B.head, tail: B.tail1 || null, neck: B.neck1,
+      animate: ANIM.quadruped, die: ANIM.collapse
+    };
+  };
+  /* ---------------- terrain: palette-driven layered material ---------------- */
+  var PALETTES = G.terrainPalettes = {
+    meadow: { grass: ['#57782f', '#6a8a36', '#47662a', '#7f9440'], dirt: ['#6b5a40', '#55452f', '#80694a'], rock: ['#86847c', '#66645e', '#a19e94'], extra: ['#bcaa7e', '#a69467', '#cfc095'], extraKind: 'sand' },
+    snow: { grass: ['#e9eef2', '#d5dde4', '#f7f9fb', '#c9d3dc'], grassKind: 'snow', dirt: ['#7c7468', '#5d564c', '#968d7f'], rock: ['#6f727a', '#54575e', '#8c9099'], extra: ['#b9c6cf', '#a3b2bd', '#d0dbe2'], extraKind: 'snow' },
+    sand: { grass: ['#cdb486', '#bba06e', '#dcc597', '#b3976a'], grassKind: 'sand', dirt: ['#a8865a', '#8e6f48', '#bf9c6c'], rock: ['#a2785a', '#86603f', '#b98e6d'], extra: ['#d8c49a', '#c7b285', '#e6d6af'], extraKind: 'sand' },
+    mud: { grass: ['#4f6a2c', '#5f7a34', '#3f5826', '#6f8238'], dirt: ['#4a3b29', '#3a2e20', '#5c4a34'], rock: ['#6f6c62', '#57544c', '#86837a'], extra: ['#3d3326', '#2f271c', '#4d4131'], extraKind: 'mud' },
+    autumn: { grass: ['#8a8a3c', '#a08a3e', '#6f7a34', '#b39a4a'], dirt: ['#6b5236', '#57432c', '#7f6544'], rock: ['#86847c', '#66645e', '#a19e94'], extra: ['#bcaa7e', '#a69467', '#cfc095'], extraKind: 'sand' }
+  };
+  function normPalette(p) {
+    p = p || {};
+    if (typeof p === 'string') p = { base: p };
+    var base = PALETTES[p.base || 'meadow'] || PALETTES.meadow, o = {};
+    o.grass = p.grass || base.grass; o.dirt = p.dirt || base.dirt; o.rock = p.rock || base.rock; o.extra = p.extra || base.extra;
+    o.grassKind = p.grassKind || base.grassKind || 'grass'; o.extraKind = p.extraKind || base.extraKind || 'sand';
+    o.scale = p.scale || [3.2, 3.6, 5.5, 3.0];
+    var r = p.rules || {};
+    o.rules = { slopeDirt: r.slopeDirt || [0.3, 0.6], slopeRock: r.slopeRock || [0.62, 1.05], shore: r.shore == null ? 1.5 : r.shore, extraMode: r.extraMode || 'shore',
+      extraLevel: r.extraLevel == null ? 20 : r.extraLevel, rockLevel: r.rockLevel == null ? null : r.rockLevel, dirtNoise: r.dirtNoise == null ? 0.35 : r.dirtNoise, grassGrow: r.grassGrow == null ? 1 : r.grassGrow };
+    o.tint = p.tint || ['#ffffff', '#f2f0d8'];
+    o.weights = p.weights || null;   // optional fn(x, z, h, slope, wl, out4) -> custom weights
+    o.mode = p.mode || 'albedo';     // 'tint': vertex colour is the albedo, layers give detail only
+    return o;
+  }
+  G.normPalette = normPalette;
+  function drawLayer(kind, cols, size, seed) {
+    var c = mkCanvas(size), x = c.getContext('2d'), rng = U.rng(seed), i, px, py;
+    x.fillStyle = cols[0]; x.fillRect(0, 0, size, size);
+    noiseOverlay(x, size, size, 4, 5, 0.55, seed + 1, 'soft-light');
+    noiseOverlay(x, size, size, 16, 3, 0.35, seed + 2, 'soft-light');
+    var k = size / 512;
+    if (kind === 'grass') {
+      x.lineCap = 'round';
+      for (var b = 0; b < 5; b++) {
+        x.strokeStyle = rgba(cols[(b % (cols.length - 1)) + 1], 0.45 + b * 0.08); x.lineWidth = (1.1 + b * 0.25) * k; x.beginPath();
+        for (i = 0; i < 2600 * k * k; i++) { px = rng() * size; py = rng() * size; var a = rng() * 6.283, L = (3 + rng() * 9) * k; wrapDraw(size, size, px, py, L + 2, function (X, Y) { x.moveTo(X, Y); x.lineTo(X + Math.cos(a) * L, Y + Math.sin(a) * L); }); }
+        x.stroke();
+      }
+      for (i = 0; i < 220 * k * k; i++) { px = rng() * size; py = rng() * size; x.fillStyle = rgba(rng() < 0.5 ? '#2c3f1c' : '#a9a35c', 0.35); x.beginPath(); x.arc(px, py, (1 + rng() * 2.2) * k, 0, 6.283); x.fill(); }
+    } else if (kind === 'dirt' || kind === 'mud') {
+      for (i = 0; i < 900 * k * k; i++) { px = rng() * size; py = rng() * size; var r = (1 + rng() * 3.5) * k; x.fillStyle = rgba(cols[1 + (i % 2)], 0.55); x.beginPath(); x.ellipse(px, py, r, r * (0.6 + rng() * 0.5), rng() * 3, 0, 6.283); x.fill(); x.fillStyle = 'rgba(255,255,240,.14)'; x.beginPath(); x.arc(px - r * 0.3, py - r * 0.3, r * 0.4, 0, 6.283); x.fill(); }
+      x.lineCap = 'round';
+      for (i = 0; i < 420 * k * k; i++) { px = rng() * size; py = rng() * size; var a2 = rng() * 6.283, L2 = (4 + rng() * 12) * k; x.strokeStyle = rgba(kind === 'mud' ? '#2a2016' : (rng() < 0.5 ? '#3b2a1a' : '#8c6a3e'), 0.5); x.lineWidth = (0.8 + rng()) * k; x.beginPath(); x.moveTo(px, py); x.lineTo(px + Math.cos(a2) * L2, py + Math.sin(a2) * L2); x.stroke(); }
+      if (kind === 'mud') for (i = 0; i < 18; i++) { px = rng() * size; py = rng() * size; x.fillStyle = 'rgba(160,170,165,.18)'; x.beginPath(); x.ellipse(px, py, (10 + rng() * 30) * k, (5 + rng() * 12) * k, rng() * 3, 0, 6.283); x.fill(); }
+      else for (i = 0; i < 160 * k * k; i++) { px = rng() * size; py = rng() * size; x.fillStyle = rgba(['#8a5a2a', '#a5743a', '#6b4a28'][i % 3], 0.5); x.beginPath(); x.ellipse(px, py, (2 + rng() * 3) * k, (1.2 + rng() * 1.5) * k, rng() * 3, 0, 6.283); x.fill(); }
+    } else if (kind === 'rock') {
+      x.lineCap = 'round'; x.lineJoin = 'round';
+      for (i = 0; i < 40; i++) { px = rng() * size; py = rng() * size; x.strokeStyle = rgba('#2e2c28', 0.5 + rng() * 0.3); x.lineWidth = (1 + rng() * 2) * k; x.beginPath(); x.moveTo(px, py); for (var s = 0; s < 6; s++) { px += (rng() - 0.5) * 50 * k; py += (rng() - 0.5) * 50 * k; x.lineTo(px, py); } x.stroke(); }
+      for (i = 0; i < 260 * k * k; i++) { px = rng() * size; py = rng() * size; x.fillStyle = rgba(rng() < 0.7 ? '#b8bba2' : '#c99a4a', 0.35); x.beginPath(); x.arc(px, py, (1.5 + rng() * 5) * k, 0, 6.283); x.fill(); }
+    } else if (kind === 'sand') {
+      for (i = 0; i < 6000 * k * k; i++) { x.fillStyle = rng() < 0.5 ? 'rgba(255,250,235,.25)' : 'rgba(80,60,30,.18)'; x.fillRect(rng() * size, rng() * size, k, k); }
+      for (i = 0; i < 120 * k * k; i++) { px = rng() * size; py = rng() * size; var r3 = (1.5 + rng() * 3) * k; x.fillStyle = rgba(cols[1 + (i % 2)], 0.7); x.beginPath(); x.ellipse(px, py, r3, r3 * 0.7, rng() * 3, 0, 6.283); x.fill(); }
+    } else if (kind === 'snow') {
+      for (i = 0; i < 2500 * k * k; i++) { x.fillStyle = rng() < 0.6 ? 'rgba(255,255,255,.5)' : 'rgba(150,170,195,.18)'; x.fillRect(rng() * size, rng() * size, k * (1 + rng()), k * (1 + rng())); }
+    }
+    return c;
+  }
+  /** terrain layer: RGB albedo (sRGB) + A = height (for height blending) */
+  function layerTex(kind, cols, seed) {
+    var size = G.isLow() ? 256 : 512;
+    return cached('layer:' + kind + cols.join(',') + size, function () {
+      var c = drawLayer(kind, cols, size, seed), d = c.getContext('2d').getImageData(0, 0, size, size).data, out = new Uint8Array(d.length);
+      for (var i = 0; i < d.length; i += 4) {
+        var lum = (d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11) / 255;
+        out[i] = d[i]; out[i + 1] = d[i + 1]; out[i + 2] = d[i + 2]; out[i + 3] = Math.max(0, Math.min(255, (lum * 1.6 - 0.15) * 255));
+      }
+      var t = new THREE.DataTexture(out, size, size, THREE.RGBAFormat);
+      t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter; t.flipY = false;
+      return finishTex(t, { srgb: false });
+    });
+  }
+  var TERRAIN_FRAG = [
+    'vec2 wuv = vWP.xz;',
+    'float mac = texture2D(tM, wuv * 0.0041).r;',
+    'float mac2 = texture2D(tM, wuv * 0.0173 + vec2(0.31, 0.77)).r;',
+    'vec4 cg = texture2D(tG, wuv * uScale.x);',
+    'vec4 cd = texture2D(tD, wuv * uScale.y);',
+    'vec4 ce = texture2D(tE, wuv * uScale.w);',
+    '#ifdef HG_HIGH',
+    ' cg = mix(cg, texture2D(tG, wuv * uScale.x * 0.23 + vec2(0.5, 0.21)), smoothstep(0.25, 0.75, mac2) * 0.65);',
+    ' cd = mix(cd, texture2D(tD, wuv * uScale.y * 0.27 + vec2(0.13, 0.6)), smoothstep(0.3, 0.7, mac) * 0.55);',
+    ' float steep = smoothstep(0.55, 0.9, 1.0 - abs(normalize(vWN).y));',
+    ' vec4 cr = mix(texture2D(tR, wuv * uScale.z), texture2D(tR, vec2(vWP.x * 0.7 + vWP.z * 0.7, vWP.y) * uScale.z), steep);',
+    '#else',
+    ' vec4 cr = texture2D(tR, wuv * uScale.z);',
+    '#endif',
+    'vec4 w = vTW * (0.3 + vec4(cg.a, cd.a, cr.a, ce.a) * 1.4);',
+    'float wm = max(max(w.x, w.y), max(w.z, w.w));',
+    'w = max(w - wm * 0.5, 0.0); w /= max(w.x + w.y + w.z + w.w, 1e-4);',
+    'vec3 alb = cg.rgb * w.x + cd.rgb * w.y + cr.rgb * w.z + ce.rgb * w.w;',
+    'alb *= 0.8 + 0.38 * mac;',
+    'diffuseColor.rgb *= sRGBToLinear(vec4(alb, 1.0)).rgb;'
+  ].join('\n');
+  /** HG.gfx.terrainMaterial(palette) -> material for terrain meshes (vertex attribute `tw` = layer weights, colour = macro tint).
+   *  palette: 'meadow'|'snow'|'sand'|'mud'|'autumn' or {base, grass:[sRGB...], dirt, rock, extra, grassKind, extraKind:'sand'|'snow'|'mud'|'grass',
+   *           scale:[m per tile x4], rules:{slopeDirt:[a,b], slopeRock:[a,b], shore, extraMode:'shore'|'high'|'low'|'noise'|'none', extraLevel, rockLevel, dirtNoise, grassGrow},
+   *           tint:[base, alt] (macro variation), weights: fn(x,z,h,slope,waterLevel,out4), mode:'albedo'|'tint'} */
+  G.terrainMaterial = function (palette) {
+    var pal = normPalette(palette), low = G.isLow();
+    var key = 'terrainMat:' + JSON.stringify([pal.grass, pal.dirt, pal.rock, pal.extra, pal.grassKind, pal.extraKind, pal.scale, pal.mode]) + low;
+    var m = cached(key, function () {
+      var t = [layerTex(pal.grassKind, pal.grass, 11), layerTex('dirt', pal.dirt, 12), layerTex('rock', pal.rock, 13), layerTex(pal.extraKind, pal.extra, 14)];
+      var macro = TX.noise({ size: 256, period: 4, octaves: 6, seed: 17 });
+      var mm = low ? new THREE.MeshLambertMaterial({ vertexColors: true }) : new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0, envMapIntensity: 0.8 });
+      var uni = { tG: { value: t[0] }, tD: { value: t[1] }, tR: { value: t[2] }, tE: { value: t[3] }, tM: { value: macro }, uScale: { value: new THREE.Vector4(1 / pal.scale[0], 1 / pal.scale[1], 1 / pal.scale[2], 1 / pal.scale[3]) } };
+      mm.userData.uniforms = uni; mm.userData.shared = true;
+      mm.onBeforeCompile = function (sh) {
+        for (var k in uni) sh.uniforms[k] = uni[k];
+        sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute vec4 tw; varying vec4 vTW; varying vec3 vWP; varying vec3 vWN;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTW = tw; vWP = (modelMatrix * vec4(position, 1.0)).xyz; vWN = normal;');
+        sh.fragmentShader = (low ? '' : '#define HG_HIGH\n') + sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform sampler2D tG; uniform sampler2D tD; uniform sampler2D tR; uniform sampler2D tE; uniform sampler2D tM; uniform vec4 uScale; varying vec4 vTW; varying vec3 vWP; varying vec3 vWN;')
+          .replace('#include <map_fragment>', TERRAIN_FRAG);
+        mm.userData.shader = sh;
+      };
+      mm.customProgramCacheKey = function () { return 'hgterrain' + (low ? 'L' : 'H'); };
+      return mm;
+    });
+    m.userData.palette = pal;
+    return m;
+  };
+  /** layer weights for one terrain vertex -> out[4] (grass, dirt, rock, extra) */
+  G.terrainWeights = function (pal, x, z, h, slope, wl, out) {
+    if (pal.weights) { pal.weights(x, z, h, slope, wl, out); return out; }
+    var R = pal.rules, n1 = fbm(x * 0.006 + 0.37, z * 0.006 + 0.11, 4, 4, 5), n2 = fbm(x * 0.013 + 0.6, z * 0.013 + 0.2, 4, 3, 8);
+    var rock = U.smooth(R.slopeRock[0], R.slopeRock[1], slope + (n2 - 0.5) * 0.15);
+    if (R.rockLevel != null) rock = Math.max(rock, U.smooth(R.rockLevel, R.rockLevel + 8, h + (n2 - 0.5) * 6));
+    var dirt = U.smooth(R.slopeDirt[0], R.slopeDirt[1], slope + (n1 - 0.5) * 0.2) * (1 - rock);
+    dirt = Math.max(dirt, U.smooth(0.6, 0.78, n1) * R.dirtNoise);
+    var extra = 0;
+    if (R.extraMode === 'shore') extra = wl > -1e8 ? U.smooth(wl + R.shore + (n2 - 0.5), wl + R.shore * 0.25, h) : 0;
+    else if (R.extraMode === 'high') extra = U.smooth(R.extraLevel, R.extraLevel + 6, h + (n1 - 0.5) * 5) * (1 - rock * 0.6);
+    else if (R.extraMode === 'low') extra = U.smooth(R.extraLevel + 2, R.extraLevel - 1, h + (n1 - 0.5) * 2);
+    else if (R.extraMode === 'noise') extra = U.smooth(0.55, 0.72, n2);
+    dirt *= 1 - extra; rock *= 1 - extra * 0.5;
+    var grass = Math.max(0, 1 - rock - dirt - extra) * R.grassGrow;
+    var s = grass + dirt + rock + extra || 1;
+    out[0] = grass / s; out[1] = dirt / s; out[2] = rock / s; out[3] = extra / s;
+    return out;
+  };
+  G.paletteFromMap = function (map) {
+    if (map.terrain) return map.terrain;
+    var gc = map.groundColors || {}, p = { base: 'meadow' };
+    if (gc.base) p.grass = [gc.base, gc.alt || shade(gc.base, 1.15), shade(gc.base, 0.82), mixHex(gc.base, '#a39a50', 0.35)];
+    if (gc.slope) p.dirt = [gc.slope, shade(gc.slope, 0.8), shade(gc.slope, 1.18)];
+    if (gc.high) p.rock = [gc.high, shade(gc.high, 0.78), shade(gc.high, 1.18)];
+    if (gc.low) p.extra = [gc.low, shade(gc.low, 0.88), shade(gc.low, 1.1)];
+    p.rules = { rockLevel: gc.highLevel == null ? null : gc.highLevel };
+    if (gc.base) p.tint = ['#ffffff', mixHex('#ffffff', gc.alt ? '#f4f0c8' : '#ffffff', 1)];
+    if (map.groundColor) p.mode = 'tint';
+    return p;
+  };
+
+  /* ---------------- water ---------------- */
+  function waterNormals() {
+    var size = G.isLow() ? 128 : 256;
+    return cached('waterN' + size, function () {
+      var c = mkCanvas(size), x = c.getContext('2d'), img = x.createImageData(size, size), d = img.data;
+      for (var j = 0; j < size; j++) for (var i = 0; i < size; i++) {
+        var u = i / size, v = j / size, h = fbm(u, v, 6, 4, 3) * 0.7 + fbm(u * 1.0 + 0.3, v, 12, 3, 9) * 0.3;
+        var q = (j * size + i) * 4; d[q] = d[q + 1] = d[q + 2] = h * 255; d[q + 3] = 255;
+      }
+      x.putImageData(img, 0, 0);
+      return finishTex(new THREE.CanvasTexture(G.normalFromCanvas(c, 5)), { srgb: false });
+    });
+  }
+  /** HG.gfx.waterMaterial(opts) -> ShaderMaterial (fresnel sky reflection, ripples, sun glint, depth tint, shore fade + foam).
+   *  opts: {shallow:'#5f9a8c', deep:'#1d4f63', opacity:0.86, ripple:1, speed:1, foam:0.35}. Needs a `depth` vertex attribute (metres below surface). */
+  G.waterMaterial = function (o) {
+    o = o || {};
+    var m = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+        time: { value: 0 }, skyTop: { value: new THREE.Color(0x4f8fd0) }, skyHorizon: { value: new THREE.Color(0xcfe0dc) }, sunDir: { value: new THREE.Vector3(0, 1, 0) },
+        sunColor: { value: new THREE.Color(0xffffff) }, sunVis: { value: 1 }, daylight: { value: 1 }, opacity: { value: o.opacity == null ? 0.86 : o.opacity },
+        shallow: { value: new THREE.Color(o.shallow || '#5c8f84') }, deep: { value: new THREE.Color(o.deep || '#1c4a5c') }, ripple: { value: o.ripple == null ? 1 : o.ripple },
+        foam: { value: o.foam == null ? 0.35 : o.foam }, tNormal: { value: null }
+      }]),
+      vertexShader: [
+        'attribute float depth; varying vec3 vWP; varying float vDepth;',
+        '#include <fog_pars_vertex>',
+        'void main(){ vec4 wp = modelMatrix * vec4(position, 1.0); vWP = wp.xyz; vDepth = depth; vec4 mvPosition = viewMatrix * wp; gl_Position = projectionMatrix * mvPosition;',
+        '#include <fog_vertex>',
+        '}'
+      ].join('\n'),
+      fragmentShader: [
+        'uniform float time; uniform vec3 skyTop; uniform vec3 skyHorizon; uniform vec3 sunDir; uniform vec3 sunColor; uniform float sunVis; uniform float daylight;',
+        'uniform float opacity; uniform vec3 shallow; uniform vec3 deep; uniform float ripple; uniform float foam; uniform sampler2D tNormal;',
+        'varying vec3 vWP; varying float vDepth;',
+        '#include <common>',
+        '#include <fog_pars_fragment>',
+        'void main(){',
+        ' vec2 uv = vWP.xz;',
+        ' vec3 n1 = texture2D(tNormal, uv * 0.061 + time * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;',
+        ' vec3 n2 = texture2D(tNormal, uv * 0.143 + time * vec2(-0.009, 0.013)).xyz * 2.0 - 1.0;',
+        ' vec3 n3 = texture2D(tNormal, uv * 0.019 - time * vec2(0.004, 0.0025)).xyz * 2.0 - 1.0;',
+        ' vec3 V = cameraPosition - vWP; float dist = length(V); V /= dist;',
+        ' float rk = ripple * (1.0 - smoothstep(30.0, 200.0, dist) * 0.75);',
+        ' vec3 N = normalize(vec3((n1.x + n2.x * 0.6 + n3.x * 0.9) * 0.22 * rk, 1.0, (n1.y + n2.y * 0.6 + n3.y * 0.9) * 0.22 * rk));',
+        ' float NV = max(dot(N, V), 0.0);',
+        ' float fres = 0.025 + 0.975 * pow(1.0 - NV, 5.0);',
+        ' vec3 R = reflect(-V, N); R.y = abs(R.y);',
+        ' vec3 sky = mix(skyHorizon, skyTop, pow(R.y, 0.55));',
+        ' float d = max(vDepth, 0.0);',
+        ' vec3 body = mix(shallow, deep, smoothstep(0.0, 3.2, d)) * daylight;',
+        ' vec3 col = mix(body, sky * mix(0.82, 1.0, daylight), clamp(fres * 1.15 + 0.06, 0.0, 1.0));',
+        ' float sr = max(dot(R, sunDir), 0.0);',
+        ' col += sunColor * sunVis * (pow(sr, 420.0) * 2.6 + pow(sr, 48.0) * 0.16);',
+        ' float a = opacity * smoothstep(0.0, 0.45, d); a = max(a, fres * smoothstep(0.0, 0.2, d) * 0.9);',
+        ' float fm = smoothstep(0.32, 0.03, d) * smoothstep(0.0, 0.05, d) * (0.55 + 0.45 * sin(time * 1.4 + (uv.x + uv.y) * 0.7 + n1.x * 3.0));',
+        ' col = mix(col, vec3(0.93, 0.95, 0.94) * daylight, fm * foam);',
+        ' a = max(a, fm * foam * 1.2);',
+        ' gl_FragColor = vec4(col, a);',
+        '#include <fog_fragment>',
+        '}'
+      ].join('\n'),
+      transparent: true, depthWrite: false, fog: true
+    });
+    m.uniforms.tNormal.value = waterNormals();
+    m.userData.water = true;
+    return m;
+  };
+
+  /* ---------------- vegetation atlas (alpha-tested cards + bark strips) ---------------- */
+  var ATLAS_R = G.atlasRegions = {
+    pine: [0, 0, 0.5, 0.25], pine2: [0.5, 0, 1, 0.25], oak: [0, 0.25, 0.25, 0.5], birch: [0.25, 0.25, 0.5, 0.5], bush: [0.5, 0.25, 0.75, 0.5], grass: [0.75, 0.25, 1, 0.5],
+    barkPine: [0, 0.5, 0.125, 1], barkOak: [0.125, 0.5, 0.25, 1], barkBirch: [0.25, 0.5, 0.375, 1], barkDead: [0.375, 0.5, 0.5, 1],
+    fern: [0.5, 0.5, 0.75, 0.75], twigs: [0.5, 0.75, 0.75, 1], flowers: [0.75, 0.5, 1, 0.625], reeds: [0.75, 0.625, 0.875, 1], dry: [0.875, 0.625, 1, 1]
+  };
+  function drawNeedleSpray(x, X, Y, W, H, rng, cols, tipCol) {
+    // twig from the left (base) to the right (tip); dense needles on both sides, spray tapering to the tip
+    var cy = Y + H * 0.5, i, j;
+    x.lineCap = 'round';
+    var mainPts = []; for (i = 0; i <= 20; i++) { var t = i / 20; mainPts.push([X + W * (0.02 + 0.95 * t), cy + Math.sin(t * 3.1) * H * 0.04]); }
+    function onMain(t) { var k = Math.min(19, Math.floor(t * 20)), f = t * 20 - k, a = mainPts[k], b = mainPts[k + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]; }
+    var twigs = [];
+    for (i = 0; i < 13; i++) {
+      var t0 = 0.06 + i * 0.07 + rng() * 0.02; if (t0 > 0.9) break;
+      var p0 = onMain(t0), side = i % 2 ? 1 : -1, len = W * (0.2 + 0.14 * Math.sin(Math.PI * Math.min(1, t0 * 1.2))) * (1 - t0 * 0.45), ang = side * (0.55 + rng() * 0.25);
+      twigs.push([p0[0], p0[1], Math.cos(ang) * len, Math.sin(ang) * len * 0.62]);
+    }
+    // needles
+    function needles(x0, y0, dx, dy, dens, width) {
+      var L = Math.sqrt(dx * dx + dy * dy), n = Math.round(L / 1.6 * dens), ux = dx / L, uy = dy / L;
+      for (var k = 0; k < n; k++) {
+        var t = k / n, px = x0 + dx * t, py = y0 + dy * t, nl = H * (0.12 + 0.05 * rng()) * (1 - t * 0.35) * width;
+        for (var sd = -1; sd <= 1; sd += 2) {
+          var a = Math.atan2(uy, ux) + sd * (0.75 + rng() * 0.45);
+          x.strokeStyle = cols[Math.floor(rng() * cols.length)]; x.lineWidth = 1.1 + rng() * 0.9;
+          x.beginPath(); x.moveTo(px, py); x.lineTo(px + Math.cos(a) * nl, py + Math.sin(a) * nl); x.stroke();
+        }
+      }
+    }
+    // underlayer for density
+    x.fillStyle = cols[0];
+    for (i = 0; i < twigs.length; i++) { var tw = twigs[i]; x.globalAlpha = 0.9; x.beginPath(); x.ellipse(tw[0] + tw[2] * 0.5, tw[1] + tw[3] * 0.5, Math.abs(tw[2]) * 0.5 + 6, H * 0.07, Math.atan2(tw[3], tw[2]), 0, 6.283); x.fill(); }
+    x.globalAlpha = 1;
+    for (i = 0; i < twigs.length; i++) needles(twigs[i][0], twigs[i][1], twigs[i][2], twigs[i][3], 1.3, 0.9);
+    needles(mainPts[0][0], mainPts[0][1], mainPts[20][0] - mainPts[0][0], mainPts[20][1] - mainPts[0][1], 1.6, 1.15);
+    x.strokeStyle = '#4a3322'; x.lineWidth = Math.max(1.5, H * 0.025); x.beginPath(); x.moveTo(mainPts[0][0], mainPts[0][1]); for (i = 1; i <= 14; i++) x.lineTo(mainPts[i][0], mainPts[i][1]); x.stroke();
+    // fresh tips
+    for (i = 0; i < twigs.length; i++) { var tp = twigs[i]; x.strokeStyle = tipCol; x.lineWidth = 1.2; for (j = 0; j < 7; j++) { var a2 = Math.atan2(tp[3], tp[2]) + (rng() - 0.5) * 1.8, nl2 = H * 0.08; x.beginPath(); x.moveTo(tp[0] + tp[2] * 0.95, tp[1] + tp[3] * 0.95); x.lineTo(tp[0] + tp[2] * 0.95 + Math.cos(a2) * nl2, tp[1] + tp[3] * 0.95 + Math.sin(a2) * nl2); x.stroke(); } }
+  }
+  function leafPath(x, len, wid, lobes) {
+    x.beginPath(); x.moveTo(0, 0);
+    if (!lobes) { x.quadraticCurveTo(wid, -len * 0.45, 0, -len); x.quadraticCurveTo(-wid, -len * 0.45, 0, 0); }
+    else {
+      var n = lobes, i;
+      for (i = 0; i < n; i++) { var y0 = -len * (i + 0.2) / n, y1 = -len * (i + 0.8) / n, w = wid * (0.7 + 0.3 * Math.sin(Math.PI * (i + 0.5) / n)); x.quadraticCurveTo(w * 1.25, y0, w * 0.55, y1); }
+      x.lineTo(0, -len);
+      for (i = n - 1; i >= 0; i--) { var y2 = -len * (i + 0.8) / n, y3 = -len * (i + 0.2) / n, w2 = wid * (0.7 + 0.3 * Math.sin(Math.PI * (i + 0.5) / n)); x.lineTo(-w2 * 0.55, y2); x.quadraticCurveTo(-w2 * 1.25, y3, 0, 0); }
+    }
+    x.closePath();
+  }
+  function drawLeafCluster(x, X, Y, W, H, rng, cols, opt) {
+    var cx = X + W / 2, cy = Y + H / 2, i;
+    x.lineCap = 'round';
+    // twigs
+    x.strokeStyle = opt.twig || '#4d3a28'; x.lineWidth = Math.max(1.2, W * 0.012);
+    for (i = 0; i < 6; i++) { var a = i / 6 * 6.283 + rng() * 0.5; x.beginPath(); x.moveTo(cx, cy + H * 0.15); x.quadraticCurveTo(cx + Math.cos(a) * W * 0.18, cy + Math.sin(a) * H * 0.18, cx + Math.cos(a) * W * 0.36, cy + Math.sin(a) * H * 0.34); x.stroke(); }
+    var n = opt.count || 70;
+    for (i = 0; i < n; i++) {
+      var r = Math.sqrt(rng()) * W * 0.4, a2 = rng() * 6.283, px = cx + Math.cos(a2) * r, py = cy + Math.sin(a2) * r * (opt.flat || 0.95);
+      var len = W * (opt.size || 0.12) * (0.7 + rng() * 0.5), wid = len * (opt.aspect || 0.42);
+      x.save(); x.translate(px, py); x.rotate(a2 + Math.PI / 2 + (rng() - 0.5) * 1.2 + (opt.droop ? 0.8 : 0));
+      var col = cols[Math.floor(rng() * cols.length)];
+      var g = x.createLinearGradient(-wid, 0, wid, 0); g.addColorStop(0, shade(col, 0.82)); g.addColorStop(0.5, col); g.addColorStop(1, shade(col, 1.12));
+      x.fillStyle = g; leafPath(x, len, wid, opt.lobes || 0); x.fill();
+      x.strokeStyle = 'rgba(30,40,15,.35)'; x.lineWidth = 0.8; x.beginPath(); x.moveTo(0, 0); x.lineTo(0, -len * 0.9); x.stroke();
+      x.restore();
+    }
+    if (opt.berries) for (i = 0; i < opt.berries; i++) { var br = Math.sqrt(rng()) * W * 0.3, ba = rng() * 6.283; x.fillStyle = rng() < 0.5 ? '#9e1f2a' : '#c43d3d'; x.beginPath(); x.arc(cx + Math.cos(ba) * br, cy + Math.sin(ba) * br, W * 0.018, 0, 6.283); x.fill(); x.fillStyle = 'rgba(255,255,255,.5)'; x.beginPath(); x.arc(cx + Math.cos(ba) * br - 1, cy + Math.sin(ba) * br - 1, W * 0.005, 0, 6.283); x.fill(); }
+  }
+  function drawGrassBlades(x, X, Y, W, H, rng, cols, opt) {
+    x.lineCap = 'round';
+    var n = opt.count || 46;
+    for (var i = 0; i < n; i++) {
+      var bx = X + W * (0.06 + 0.88 * rng()), h = H * (opt.minH || 0.45) + H * (1 - (opt.minH || 0.45)) * rng() * 0.95, lean = (rng() - 0.5) * W * 0.35;
+      var base = cols[Math.floor(rng() * 2)], tip = cols[2 + Math.floor(rng() * (cols.length - 2))];
+      var g = x.createLinearGradient(0, Y + H, 0, Y + H - h); g.addColorStop(0, base); g.addColorStop(1, tip);
+      x.fillStyle = g; var w0 = W * (opt.width || 0.022) * (0.7 + rng() * 0.6);
+      x.beginPath(); x.moveTo(bx - w0, Y + H); x.quadraticCurveTo(bx - w0 * 0.6 + lean * 0.3, Y + H - h * 0.5, bx + lean, Y + H - h); x.quadraticCurveTo(bx + w0 * 0.6 + lean * 0.3, Y + H - h * 0.5, bx + w0, Y + H); x.fill();
+      if (opt.seeds && rng() < opt.seeds) { x.fillStyle = opt.seedCol || '#c8b27a'; for (var s = 0; s < 6; s++) { x.beginPath(); x.ellipse(bx + lean + (rng() - 0.5) * 3, Y + H - h + s * 3.2, 1.6, 3, lean * 0.01, 0, 6.283); x.fill(); } }
+    }
+  }
+  function drawFern(x, X, Y, W, H, rng) {
+    var cx = X + W / 2, by = Y + H * 0.98, cols = ['#3d6a2a', '#4b7a30', '#5a8a36', '#335a24'];
+    x.lineCap = 'round';
+    for (var f = 0; f < 9; f++) {
+      var a = -Math.PI / 2 + (f / 8 - 0.5) * 2.4, L = H * (0.55 + rng() * 0.4), bend = (f / 8 - 0.5) * 0.9;
+      var pts = []; for (var i = 0; i <= 12; i++) { var t = i / 12, aa = a + bend * t * t; pts.push([cx + Math.cos(aa) * L * t, by + Math.sin(aa) * L * t + t * t * H * 0.18]); }
+      x.strokeStyle = '#3b5a22'; x.lineWidth = 1.6; x.beginPath(); x.moveTo(pts[0][0], pts[0][1]); for (i = 1; i <= 12; i++) x.lineTo(pts[i][0], pts[i][1]); x.stroke();
+      for (i = 2; i < 12; i++) {
+        var p = pts[i], q = pts[i + 1], dx = q[0] - p[0], dy = q[1] - p[1], dl = Math.sqrt(dx * dx + dy * dy) || 1, nx = -dy / dl, ny = dx / dl, ll = W * 0.12 * Math.sin(Math.PI * i / 12) + 3;
+        for (var sd = -1; sd <= 1; sd += 2) { x.fillStyle = cols[(i + f) % 4]; x.save(); x.translate(p[0], p[1]); x.rotate(Math.atan2(ny * sd + dy / dl * 0.5, nx * sd + dx / dl * 0.5) + Math.PI / 2); leafPath(x, ll, ll * 0.22, 0); x.fill(); x.restore(); }
+      }
+    }
+  }
+  function drawTwigs(x, X, Y, W, H, rng, col) {
+    x.lineCap = 'round'; x.strokeStyle = col;
+    function br(px, py, a, len, w, d) {
+      if (d > 4 || len < 3) return;
+      var ex = px + Math.cos(a) * len, ey = py + Math.sin(a) * len;
+      x.lineWidth = w; x.beginPath(); x.moveTo(px, py); x.quadraticCurveTo(px + Math.cos(a + 0.2) * len * 0.5, py + Math.sin(a + 0.2) * len * 0.5, ex, ey); x.stroke();
+      var n = 2 + Math.floor(rng() * 2);
+      for (var i = 0; i < n; i++) br(px + (ex - px) * (0.4 + rng() * 0.6), py + (ey - py) * (0.4 + rng() * 0.6), a + (rng() - 0.5) * 1.4, len * (0.45 + rng() * 0.25), w * 0.65, d + 1);
+    }
+    for (var k = 0; k < 3; k++) br(X + W * 0.05, Y + H * (0.3 + k * 0.2), (rng() - 0.5) * 0.4, W * 0.45, Math.max(2, W * 0.025), 0);
+  }
+  function drawFlowers(x, X, Y, W, H, rng) {
+    var cols = ['#f4d24a', '#f6f2ea', '#b48ad6', '#e9894a', '#f2f2ff'];
+    x.lineCap = 'round';
+    for (var i = 0; i < 14; i++) {
+      var bx = X + W * (0.05 + 0.9 * rng()), h = H * (0.45 + rng() * 0.5), top = Y + H - h, lean = (rng() - 0.5) * 10;
+      x.strokeStyle = '#4f7a2e'; x.lineWidth = 1.6; x.beginPath(); x.moveTo(bx, Y + H); x.quadraticCurveTo(bx + lean, Y + H - h * 0.5, bx + lean, top); x.stroke();
+      x.fillStyle = '#5f8a36'; x.save(); x.translate(bx + lean * 0.4, Y + H - h * 0.35); x.rotate(0.8); leafPath(x, h * 0.25, 3, 0); x.fill(); x.restore();
+      var c = cols[i % cols.length], pr = 3 + rng() * 3;
+      for (var p = 0; p < 6; p++) { var a = p / 6 * 6.283; x.fillStyle = c; x.beginPath(); x.ellipse(bx + lean + Math.cos(a) * pr, top + Math.sin(a) * pr * 0.7, pr * 0.75, pr * 0.45, a, 0, 6.283); x.fill(); }
+      x.fillStyle = '#c99a2e'; x.beginPath(); x.arc(bx + lean, top, pr * 0.45, 0, 6.283); x.fill();
+    }
+    drawGrassBlades(x, X, Y, W, H, rng, ['#3f6a26', '#4f7a2e', '#7a9a40', '#8fae4a'], { count: 16, minH: 0.25, width: 0.02 });
+  }
+  function drawReeds(x, X, Y, W, H, rng) {
+    drawGrassBlades(x, X, Y, W, H, rng, ['#4f6a2a', '#5f7a30', '#8a9a4a', '#a5a85a'], { count: 22, minH: 0.55, width: 0.05 });
+    for (var i = 0; i < 4; i++) { var bx = X + W * (0.2 + 0.6 * rng()), top = Y + H * (0.04 + rng() * 0.12); x.strokeStyle = '#6b7a3a'; x.lineWidth = 2; x.beginPath(); x.moveTo(bx, Y + H); x.lineTo(bx, top); x.stroke(); x.fillStyle = '#5a3a22'; x.beginPath(); x.ellipse(bx, top + H * 0.08, W * 0.045, H * 0.07, 0, 0, 6.283); x.fill(); }
+  }
+  /** Build (once) the shared vegetation atlas -> {texture, regions} */
+  G.vegAtlas = function () {
+    var S = G.level() === 'ultra' ? 2048 : 1024;
+    return cached('vegAtlas' + S, function () {
+      var c = mkCanvas(S), x = c.getContext('2d'), R = ATLAS_R, rng = U.rng(4242), pad = 3;
+      function rect(r) { return [r[0] * S + pad, r[1] * S + pad, (r[2] - r[0]) * S - pad * 2, (r[3] - r[1]) * S - pad * 2]; }
+      var q;
+      q = rect(R.pine); drawNeedleSpray(x, q[0], q[1], q[2], q[3], rng, ['#1d3a1e', '#24452a', '#2c5530', '#355f32', '#1a3320'], '#6f9a45');
+      q = rect(R.pine2); drawNeedleSpray(x, q[0], q[1], q[2], q[3], rng, ['#223e2c', '#2a4d38', '#355c3e', '#3f6a44', '#1d3426'], '#7fa858');
+      q = rect(R.oak); drawLeafCluster(x, q[0], q[1], q[2], q[3], rng, ['#3e5f26', '#4d702e', '#5d7f33', '#344f20', '#6b8a3a'], { count: 64, size: 0.16, aspect: 0.5, lobes: 3 });
+      q = rect(R.birch); drawLeafCluster(x, q[0], q[1], q[2], q[3], rng, ['#7f9a36', '#9aae44', '#6b8a30', '#b5b84e', '#8fa83e'], { count: 90, size: 0.1, aspect: 0.55, droop: true, flat: 0.8 });
+      q = rect(R.bush); drawLeafCluster(x, q[0], q[1], q[2], q[3], rng, ['#3f6228', '#4f742e', '#5c8236', '#36552a'], { count: 95, size: 0.11, aspect: 0.6, berries: 10 });
+      q = rect(R.grass); drawGrassBlades(x, q[0], q[1], q[2], q[3], rng, ['#3d5a22', '#4a6a28', '#7a9a40', '#93ad52', '#a9b45e'], { count: 60, minH: 0.4, seeds: 0.12 });
+      q = rect(R.fern); drawFern(x, q[0], q[1], q[2], q[3], rng);
+      q = rect(R.twigs); drawTwigs(x, q[0], q[1], q[2], q[3], rng, '#5a4a3a');
+      q = rect(R.flowers); drawFlowers(x, q[0], q[1], q[2], q[3], rng);
+      q = rect(R.reeds); drawReeds(x, q[0], q[1], q[2], q[3], rng);
+      q = rect(R.dry); drawGrassBlades(x, q[0], q[1], q[2], q[3], rng, ['#8a7a42', '#9a884a', '#c9b06a', '#d8c27a', '#bfa75e'], { count: 34, minH: 0.5, seeds: 0.4, seedCol: '#d8c48a' });
+      // bark strips (opaque)
+      paintBark(x, R.barkPine[0] * S, R.barkPine[1] * S, (R.barkPine[2] - R.barkPine[0]) * S, (R.barkPine[3] - R.barkPine[1]) * S, 'pine', rng, { base: '#5e4130', moss: null });
+      paintBark(x, R.barkOak[0] * S, R.barkOak[1] * S, (R.barkOak[2] - R.barkOak[0]) * S, (R.barkOak[3] - R.barkOak[1]) * S, 'oak', rng, { base: '#5d544a', moss: '#5a7a34' });
+      paintBark(x, R.barkBirch[0] * S, R.barkBirch[1] * S, (R.barkBirch[2] - R.barkBirch[0]) * S, (R.barkBirch[3] - R.barkBirch[1]) * S, 'birch', rng, { base: '#e6e2d6' });
+      paintBark(x, R.barkDead[0] * S, R.barkDead[1] * S, (R.barkDead[2] - R.barkDead[0]) * S, (R.barkDead[3] - R.barkDead[1]) * S, 'dead', rng, { base: '#8b8478' });
+      var tex = G.alphaTexture('vegAtlas', c, { clamp: true });
+      return { texture: tex, regions: R, canvas: c, size: S };
+    });
+  };
+  function foliagePatch(shader, low) {
+    if (low) shader.fragmentShader = shader.fragmentShader.replace(/\( gl_FrontFacing \) \? (v\w+)Front : v\w+Back/g, '$1Front');
+    else shader.fragmentShader = shader.fragmentShader.replace('#include <normal_fragment_begin>', THREE.ShaderChunk.normal_fragment_begin.replace('normal = normal * faceDirection;', ''));
+  }
+  /** shared vegetation materials: kind 'tree' | 'grass' | 'plant' (atlas, alpha test, double sided, wind, foliage normals) */
+  G.vegMaterial = function (kind) {
+    var atlas = G.vegAtlas(), low = G.isLow();
+    var amp = kind === 'grass' ? 0.42 : kind === 'plant' ? 0.12 : 0.0016;
+    var key = 'veg:' + kind + ':' + atlas.size;
+    var m = G.mat({ map: atlas.texture, alphaTest: kind === 'tree' ? 0.42 : 0.38, side: THREE.DoubleSide, vertexColors: true, roughness: 0.82, key: key, envMapIntensity: 0.75 });
+    if (!m.userData.vegReady) {
+      var cfg = { amp: amp, fade: kind === 'grass' ? [1e6, 2e6] : null };
+      m.userData.wind = cfg;
+      m.onBeforeCompile = function (sh) { windPatch(sh, cfg); foliagePatch(sh, low); m.userData.shader = sh; };
+      m.customProgramCacheKey = function () { return 'hgveg' + (low ? 'L' : 'H'); };
+      m.userData.vegReady = true;
+    }
+    return m;
+  };
+  /** set the grass fade radius (instanced near-player grass) */
+  G.setGrassFade = function (r0, r1) { var m = G.vegMaterial('grass'); m.userData.wind.fade = [r0, r1]; if (m.userData.shader) m.userData.shader.uniforms.uFade.value.set(r0, r1); };
+
+  /* ---------------- tree / plant builders (instancing friendly: origin at the base, y up) ---------------- */
+  function uvR(r, s, t) { return [r[0] + (r[2] - r[0]) * s, r[1] + (r[3] - r[1]) * t]; }
+  var _cn = new THREE.Vector3(), _cx = new THREE.Vector3(), _cy = new THREE.Vector3(), _cp = new THREE.Vector3();
+  /** bent card strip: base P, length axis X, width axis Y (unit), len, wid, segs, droop (m at tip), region, normal centre C, colour fn(s)->k */
+  function cardStrip(buf, P, X, Y, len, wid, segs, droop, reg, C, k0, k1, normalUp) {
+    var base = buf.n;
+    for (var i = 0; i <= segs; i++) {
+      var s = i / segs, py = -droop * s * s;
+      for (var j = 0; j < 2; j++) {
+        var w = (j - 0.5) * wid;
+        var x = P.x + X.x * len * s + Y.x * w, y = P.y + X.y * len * s + Y.y * w + py, z = P.z + X.z * len * s + Y.z * w;
+        _cn.set(x - C.x, (y - C.y) * 0.6 + (normalUp || 0.35) * len, z - C.z).normalize();
+        var uv = uvR(reg, s, j), kk = k0 + (k1 - k0) * s;
+        buf.v(x, y, z, _cn.x, _cn.y, _cn.z, uv[0], uv[1], kk, kk, kk);
+      }
+    }
+    for (i = 0; i < segs; i++) { var a = base + i * 2; buf.tri(a, a + 2, a + 1); buf.tri(a + 1, a + 2, a + 3); }
+  }
+  function addTrunk(buf, pts, radii, reg, radial, k0, k1, stepsPerSeg) {
+    var g = G.tube(pts, radii, { radial: radial, steps: stepsPerSeg || 2, uRange: [reg[0] + 0.003, reg[2] - 0.003], vRange: [reg[3] - 0.003, reg[1] + 0.003], capStart: false, capEnd: true, capBulge: 0.2 });
+    var p = g.attributes.position, n = g.attributes.normal, uv = g.attributes.uv, base = buf.n, ymax = 0, i;
+    for (i = 0; i < p.count; i++) ymax = Math.max(ymax, p.getY(i));
+    for (i = 0; i < p.count; i++) { var kk = k0 + (k1 - k0) * Math.min(1, p.getY(i) / Math.max(1, ymax)); buf.v(p.getX(i), p.getY(i), p.getZ(i), n.getX(i), n.getY(i), n.getZ(i), uv.getX(i), uv.getY(i), kk, kk, kk); }
+    for (i = 0; i < g.index.count; i++) buf.idx.push(g.index.array[i] + base);
+    g.dispose();
+  }
+  function finishVeg(buf, kind) { var g = buf.geometry(); g.userData.shared = true; return g; }
+  var TREES = G.trees = {};
+  /** Conifer (spruce/fir-like). o: {height:12, seed, spread:0.24 (radius/height), whorls, low:bool} -> {geometry, material, lod:{geometry, dist}, height, radius} */
+  TREES.pine = function (o) {
+    o = o || {};
+    var key = 'pine:' + JSON.stringify(o);
+    return cached(key, function () {
+      function build(lo) {
+        var rng = U.rng(o.seed || 1), H = o.height || 12, buf = new MeshBuf(), R = ATLAS_R, spread = o.spread || 0.23;
+        var r0 = H * 0.022 + 0.08;
+        var tp = [], tr = [];
+        for (var i = 0; i <= 6; i++) { var t = i / 6; tp.push([(rng() - 0.5) * 0.08 * t, t * H * 0.99, (rng() - 0.5) * 0.08 * t]); tr.push(i === 0 ? r0 * 1.35 : Math.max(0.03, r0 * Math.pow(1 - t, 1.05))); }
+        addTrunk(buf, tp, tr, R.barkPine, lo ? 5 : 8, 0.55, 0.9, lo ? 1 : 2);
+        var y0 = H * (o.clear || 0.16), nW = lo ? 6 : (o.whorls || 13), C = new THREE.Vector3(0, 0, 0);
+        for (var w = 0; w < nW; w++) {
+          var tf = Math.pow(w / (nW - 1), 0.92), y = y0 + (H * 0.95 - y0) * tf, L = (H * spread * Math.pow(1 - tf, 0.8) + 0.35) * (0.86 + rng() * 0.26);
+          var nb = lo ? 3 : (tf > 0.8 ? 4 : 5 + (rng() < 0.5 ? 1 : 0)), rot = rng() * 6.283, kIn = 0.42 + 0.3 * tf, kOut = 0.85 + 0.15 * tf;
+          C.set(0, y + L * 0.1, 0);
+          for (var b = 0; b < nb; b++) {
+            var a = rot + b / nb * 6.283 + (rng() - 0.5) * 0.5, up = 0.12 - 0.35 * (1 - tf) + (rng() - 0.5) * 0.1;
+            _cx.set(Math.cos(a), up, Math.sin(a)).normalize();
+            var droop = L * (0.12 + 0.3 * (1 - tf)), reg = rng() < 0.3 ? R.pine2 : R.pine;
+            _cp.set(Math.cos(a) * r0 * 0.5, y, Math.sin(a) * r0 * 0.5);
+            var cards = 2;
+            for (var c = 0; c < cards; c++) {
+              var tilt = (c === 0 ? 1 : -1) * (lo ? 0.75 : 0.6);
+              // width axis: horizontal perpendicular, tilted around the branch axis
+              _cy.set(-Math.sin(a), 0, Math.cos(a));
+              var cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+              var vx = _cy.x * cosT, vy = sinT, vz = _cy.z * cosT;
+              _cy.set(vx, vy, vz).normalize();
+              cardStrip(buf, _cp, _cx, _cy, L, L * 0.56, lo ? 1 : 3, droop, reg, C, kIn * (0.9 + rng() * 0.2), kOut, 0.4);
+            }
+          }
+        }
+        // leader / top tuft
+        C.set(0, H * 0.9, 0);
+        for (var t2 = 0; t2 < (lo ? 1 : 3); t2++) { var aa = t2 / 3 * 3.14; _cp.set(0, H * 0.86, 0); _cx.set(0, 1, 0); _cy.set(Math.cos(aa), 0, Math.sin(aa)); cardStrip(buf, _cp, _cx, _cy, H * 0.16, H * 0.07, 1, 0, R.pine2, C, 0.8, 1, 0.2); }
+        return finishVeg(buf);
+      }
+      var H = o.height || 12;
+      return { geometry: build(false), material: G.vegMaterial('tree'), lod: { geometry: build(true), dist: o.lodDist || 60 }, height: H, radius: H * (o.spread || 0.23), castShadow: true };
+    });
+  };
+  function broadleaf(o, kind) {
+    o = o || {};
+    var key = kind + ':' + JSON.stringify(o);
+    return cached(key, function () {
+      var H = o.height || (kind === 'birch' ? 9 : 8);
+      function build(lo) {
+        var rng = U.rng(o.seed || 3), buf = new MeshBuf(), R = ATLAS_R, birch = kind === 'birch', dead = kind === 'dead';
+        var bark = birch ? R.barkBirch : dead ? R.barkDead : R.barkOak, leaf = birch ? R.birch : R.oak;
+        var r0 = H * (birch ? 0.017 : 0.035) + 0.05, hb = H * (birch ? 0.25 : dead ? 0.45 : 0.38), C = new THREE.Vector3(0, H * (birch ? 0.6 : 0.62), 0);
+        var tp = [], tr = [], topH = dead ? H * 0.82 : (birch ? H * 0.96 : hb * 1.15);
+        for (var i = 0; i <= 5; i++) { var t = i / 5; tp.push([(rng() - 0.5) * 0.18 * t, t * topH, (rng() - 0.5) * 0.18 * t]); tr.push(i === 0 ? r0 * 1.3 : r0 * (1 - t * (dead ? 0.55 : birch ? 0.85 : 0.35))); }
+        addTrunk(buf, tp, tr, bark, lo ? 5 : 8, 0.6, 0.95, lo ? 1 : 2);
+        var clusters = [];
+        var limbs = lo ? 3 : (birch ? 7 : dead ? 4 : 5);
+        for (var l = 0; l < limbs; l++) {
+          var a = l / limbs * 6.283 + rng() * 0.6, sy = birch ? hb + (H * 0.7 - hb) * (l / limbs) : hb * (0.85 + rng() * 0.3);
+          var len = birch ? H * (0.22 - 0.1 * l / limbs) : H * (0.38 + rng() * 0.12) * (dead ? 0.7 : 1), rise = birch ? 0.75 : 0.85 + rng() * 0.3;
+          var p0 = [Math.cos(a) * r0 * 0.3, sy, Math.sin(a) * r0 * 0.3], p1 = [Math.cos(a) * len * 0.5, sy + len * rise * 0.55, Math.sin(a) * len * 0.5], p2 = [Math.cos(a) * len * 0.85, sy + len * rise * (birch ? 0.75 : 0.9), Math.sin(a) * len * 0.85];
+          if (!lo || !birch) addTrunk(buf, [p0, p1, p2], [r0 * (birch ? 0.35 : 0.55), r0 * 0.3, r0 * 0.12], bark, lo ? 4 : 6, 0.7, 0.95, 1);
+          if (!dead) { clusters.push(p1, p2); if (!lo) for (var sb = 0; sb < 2; sb++) { var sa = a + (sb ? 0.7 : -0.7); clusters.push([p1[0] + Math.cos(sa) * len * 0.35, p1[1] + len * 0.2 + rng() * len * 0.2, p1[2] + Math.sin(sa) * len * 0.35]); } }
+          else if (!lo) { var tw = { x: p2[0], y: p2[1], z: p2[2] }; _cp.set(tw.x, tw.y, tw.z); _cx.set(Math.cos(a), 0.6, Math.sin(a)).normalize(); _cy.set(-Math.sin(a), 0, Math.cos(a)); cardStrip(buf, _cp, _cx, _cy, len * 0.5, len * 0.35, 1, 0, R.twigs, C, 0.8, 0.9, 0.3); }
+        }
+        if (!dead) {
+          // fill the crown
+          var extra = lo ? 4 : (birch ? 10 : 12);
+          for (var e = 0; e < extra; e++) { var ea = rng() * 6.283, er = Math.sqrt(rng()) * H * (birch ? 0.2 : 0.32); clusters.push([Math.cos(ea) * er, C.y + (rng() - 0.35) * H * (birch ? 0.45 : 0.32), Math.sin(ea) * er]); }
+          var cs = H * (birch ? 0.13 : 0.18) * (lo ? 1.7 : 1);
+          clusters.forEach(function (p) {
+            var nq = lo ? 2 : 3, ro = rng() * 3.14;
+            for (var q = 0; q < nq; q++) {
+              var qa = ro + q / nq * 3.14, tilt = (rng() - 0.5) * 0.8;
+              _cx.set(Math.cos(qa), tilt, Math.sin(qa)).normalize(); _cy.set(-Math.sin(qa) * 0.3, 1, Math.cos(qa) * 0.3).normalize();
+              _cp.set(p[0] - _cx.x * cs * 0.5, p[1] - _cy.y * 0, p[2] - _cx.z * cs * 0.5);
+              var k = 0.62 + 0.38 * U.clamp((p[1] - C.y) / (H * 0.4) + 0.5, 0, 1);
+              cardStrip(buf, _cp, _cx, _cy, cs, cs, 1, birch ? cs * 0.18 : 0, leaf, C, k, k * 1.05, 0.3);
+            }
+          });
+        }
+        return finishVeg(buf);
+      }
+      return { geometry: build(false), material: G.vegMaterial('tree'), lod: { geometry: build(true), dist: o.lodDist || 55 }, height: H, radius: H * 0.3, castShadow: true };
+    });
+  }
+  /** Broadleaf oak. o: {height:8, seed} */
+  TREES.oak = function (o) { return broadleaf(o, 'oak'); };
+  /** Birch / aspen (white bark). o: {height:9, seed} */
+  TREES.birch = function (o) { return broadleaf(o, 'birch'); };
+  /** Dead snag (bare branches). o: {height:8, seed} */
+  TREES.dead = function (o) { return broadleaf(o, 'dead'); };
+  /** Bush. o: {size:1.2, seed, berries:false} */
+  TREES.bush = function (o) {
+    o = o || {};
+    return cached('bush:' + JSON.stringify(o), function () {
+      function build(lo) {
+        var rng = U.rng(o.seed || 5), buf = new MeshBuf(), s = o.size || 1.2, C = new THREE.Vector3(0, s * 0.25, 0), n = lo ? 5 : 14, reg = ATLAS_R.bush;
+        for (var i = 0; i < n; i++) {
+          var a = rng() * 6.283, el = rng() * 1.1, r = s * (0.3 + rng() * 0.35);
+          var px = Math.cos(a) * Math.cos(el) * r, py = s * 0.18 + Math.sin(el) * r * 0.8, pz = Math.sin(a) * Math.cos(el) * r, cs = s * (0.65 + rng() * 0.3) * (lo ? 1.3 : 1);
+          _cx.set(Math.cos(a + 1.3), (rng() - 0.5) * 0.6, Math.sin(a + 1.3)).normalize(); _cy.set(0, 1, 0);
+          _cp.set(px - _cx.x * cs / 2, py - cs / 2, pz - _cx.z * cs / 2);
+          var k = 0.55 + 0.45 * U.clamp(py / s, 0, 1);
+          cardStrip(buf, _cp, _cx, _cy, cs, cs, 1, 0, reg, C, k, k, 0.5);
+        }
+        if (!lo) for (var t = 0; t < 3; t++) { var ta = rng() * 6.283; _cp.set(0, 0.05, 0); _cx.set(Math.cos(ta), 0.8, Math.sin(ta)).normalize(); _cy.set(-Math.sin(ta), 0, Math.cos(ta)); cardStrip(buf, _cp, _cx, _cy, s * 0.8, s * 0.6, 1, 0, ATLAS_R.twigs, C, 0.6, 0.8, 0.3); }
+        return finishVeg(buf);
+      }
+      return { geometry: build(false), material: G.vegMaterial('plant'), lod: { geometry: build(true), dist: o.lodDist || 45 }, height: (o.size || 1.2) * 0.9, radius: (o.size || 1.2) * 0.6 };
+    });
+  };
+  /** Ground plants from crossed cards: kind 'grass'|'fern'|'flowers'|'reeds'|'dry'. o: {size, seed, cards:3} */
+  G.plant = function (kind, o) {
+    o = o || {};
+    return cached('plant:' + kind + JSON.stringify(o), function () {
+      var rng = U.rng(o.seed || 9), buf = new MeshBuf(), reg = ATLAS_R[kind] || ATLAS_R.grass, s = o.size || 1;
+      var dims = { grass: [0.75, 0.5], fern: [1.1, 0.8], flowers: [0.8, 0.45], reeds: [0.7, 1.6], dry: [0.6, 1.0] }[kind] || [0.8, 0.5];
+      var W = dims[0] * s, Hh = dims[1] * s, n = o.cards || (kind === 'fern' ? 4 : 3), C = new THREE.Vector3(0, -Hh, 0);
+      for (var i = 0; i < n; i++) {
+        var a = i / n * 3.14159 + rng() * 0.4, lean = kind === 'fern' ? 0.55 : 0.12;
+        _cx.set(Math.cos(a), 0, Math.sin(a)); _cy.set(-Math.sin(a) * lean, 1, Math.cos(a) * lean).normalize();
+        if (kind === 'fern') { // fronds splay outward: two half cards
+          for (var sd = -1; sd <= 1; sd += 2) { _cp.set(0, 0, 0); var dx = _cx.x * sd, dz = _cx.z * sd; _cy.set(dx * 0.9, 0.6, dz * 0.9).normalize(); var X = new THREE.Vector3(-dz, 0, dx); var bb = buf.n;
+            // quad: bottom edge at centre, top outward
+            var reg2 = [reg[0] + (reg[2] - reg[0]) * (sd < 0 ? 0 : 0.5), reg[1], reg[0] + (reg[2] - reg[0]) * (sd < 0 ? 0.5 : 1), reg[3]];
+            var corners = [[-0.5, 0], [0.5, 0], [-0.5, 1], [0.5, 1]];
+            corners.forEach(function (cc) { var px = X.x * cc[0] * W * 0.5 + _cy.x * cc[1] * Hh, py = _cy.y * cc[1] * Hh, pz = X.z * cc[0] * W * 0.5 + _cy.z * cc[1] * Hh; _cn.set(px, py + 0.5, pz).normalize(); var uv = uvR(reg2, sd < 0 ? 1 - (cc[0] + 0.5) : cc[0] + 0.5, 1 - cc[1]); var k = 0.55 + 0.45 * cc[1]; buf.v(px, py, pz, _cn.x, _cn.y, _cn.z, uv[0], uv[1], k, k, k); });
+            buf.tri(bb, bb + 1, bb + 2); buf.tri(bb + 1, bb + 3, bb + 2); }
+          continue;
+        }
+        var b0 = buf.n;
+        for (var r = 0; r <= 2; r++) for (var c = 0; c < 2; c++) {
+          var t = r / 2, w = (c - 0.5) * W, bend = t * t * Hh * 0.12;
+          var px2 = _cx.x * w + _cy.x * t * Hh + Math.cos(a + 1.57) * bend, py2 = _cy.y * t * Hh, pz2 = _cx.z * w + _cy.z * t * Hh + Math.sin(a + 1.57) * bend;
+          _cn.set(px2 * 0.4, 1, pz2 * 0.4).normalize();
+          var uv2 = uvR(reg, c, 1 - t), kk = 0.5 + 0.5 * t;
+          buf.v(px2, py2, pz2, _cn.x, _cn.y, _cn.z, uv2[0], uv2[1], kk, kk, kk);
+        }
+        for (r = 0; r < 2; r++) { var q = b0 + r * 2; buf.tri(q, q + 1, q + 2); buf.tri(q + 1, q + 3, q + 2); }
+      }
+      return { geometry: finishVeg(buf), material: G.vegMaterial(kind === 'grass' ? 'grass' : 'plant'), height: Hh };
+    });
+  };
+  /** Rock texture (lichen) */
+  TX.rock = function (o) {
+    o = o || {};
+    var size = texSize(512);
+    return cached('rocktex' + JSON.stringify(o) + size, function () {
+      var c = drawLayer('rock', [o.base || '#8a877e', '#5f5d57', '#a39f95'], size, o.seed || 31);
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  var ROCK_FRAG = [
+    '#ifdef USE_MAP',
+    ' vec3 bw = pow(abs(vON), vec3(4.0)); bw /= (bw.x + bw.y + bw.z);',
+    ' vec4 tx = texture2D(map, vOP.yz * uTri) * bw.x + texture2D(map, vOP.xz * uTri + 0.37) * bw.y + texture2D(map, vOP.xy * uTri + 0.71) * bw.z;',
+    ' diffuseColor *= mapTexelToLinear(tx);',
+    '#endif'
+  ].join('\n');
+  /** rock material (triplanar lichen texture in object space) */
+  G.rockMaterial = function (o) {
+    o = o || {};
+    var low = G.isLow(), tex = TX.rock(o);
+    var m = G.mat({ map: tex, vertexColors: true, roughness: 0.92, normalMap: low ? null : TX.normalOf(tex, 3), normalScale: 0.8, key: 'rock:' + JSON.stringify(o) });
+    if (!m.userData.rockReady) {
+      m.onBeforeCompile = function (sh) {
+        sh.uniforms.uTri = { value: o.scale || 0.55 };
+        sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vOP; varying vec3 vON;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvOP = position; vON = normal;');
+        sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uTri; varying vec3 vOP; varying vec3 vON;').replace('#include <map_fragment>', ROCK_FRAG);
+      };
+      m.customProgramCacheKey = function () { return 'hgrock' + (low ? 'L' : 'H'); };
+      m.userData.rockReady = true;
+    }
+    return m;
+  };
+  /** Natural rock: displaced icosahedron, flattened base, moss on top, crevice AO. o: {size:1, seed, flat:0.65, moss:'#5d7a35'} */
+  G.rock = function (o) {
+    o = o || {};
+    return cached('rock:' + JSON.stringify(o), function () {
+      function build(detail) {
+        var s = o.size || 1, seed = o.seed || 1, g = new THREE.IcosahedronGeometry(s, detail), p = g.attributes.position;
+        // weld (Icosahedron is non-indexed in r128): build an indexed copy
+        var map = {}, verts = [], idx = [];
+        for (var i = 0; i < p.count; i++) { var x = p.getX(i), y = p.getY(i), z = p.getZ(i), k = Math.round(x * 1e4) + ',' + Math.round(y * 1e4) + ',' + Math.round(z * 1e4); if (map[k] == null) { map[k] = verts.length / 3; verts.push(x, y, z); } idx.push(map[k]); }
+        g.dispose();
+        var ng = new THREE.BufferGeometry(), dsp = [];
+        for (i = 0; i < verts.length; i += 3) {
+          var vx = verts[i] / s, vy = verts[i + 1] / s, vz = verts[i + 2] / s;
+          var n = fbm3(vx * 1.3 + seed, vy * 1.3, vz * 1.3, 4, seed) - 0.5, ridge = Math.abs(fbm3(vx * 3 + 9, vy * 3, vz * 3, 3, seed + 5) - 0.5);
+          var r = s * (1 + n * 0.7 - ridge * 0.25);
+          var fx = vx * r * (o.stretch || 1.25), fy = vy * r * (o.flat || 0.62), fz = vz * r;
+          if (fy < -s * 0.15) fy = -s * 0.15 + (fy + s * 0.15) * 0.2;
+          verts[i] = fx; verts[i + 1] = fy; verts[i + 2] = fz; dsp.push(n - ridge * 0.5);
+        }
+        ng.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3)); ng.setIndex(idx); ng.computeVertexNormals();
+        var moss = new THREE.Color(o.moss || '#5d7a35'), base = new THREE.Color('#ffffff');
+        G.paint(ng, function (c, x, y, z, nx, ny, nz, u, v, i) {
+          var k = 0.78 + dsp[i] * 0.9; k = U.clamp(k, 0.45, 1.15);
+          c.copy(base).multiplyScalar(k);
+          var m = U.smooth(0.55, 0.85, ny) * U.smooth(-0.1, 0.25, fbm3(x * 1.5, y * 1.5, z * 1.5, 3, 77) - 0.35) * (o.mossAmount == null ? 1 : o.mossAmount);
+          c.lerp(moss, m * 0.85);
+        });
+        G.vertexAO(ng, { ground: -s * 0.15, groundStrength: 0.5, groundFalloff: s * 0.3, strength: 0, under: 0.2 });
+        ng.computeBoundingSphere(); ng.userData.shared = true;
+        return ng;
+      }
+      return { geometry: build(G.isLow() ? 2 : 3), material: G.rockMaterial(o.texture), lod: { geometry: build(1), dist: o.lodDist || 70 }, castShadow: true };
+    });
+  };
+
+  /* ---------------- dynamic grass around the player ---------------- */
+  var grassSys = G.grass = { mesh: null, radius: 26, spacing: 0.8, cx: 1e9, cz: 1e9, enabled: true, density: 1 };
+  function grassClumpGeo() {
+    return cached('grassClump', function () {
+      var buf = new MeshBuf(), reg = ATLAS_R.grass, W = 0.78, Hh = 0.52, n = 3, C = new THREE.Vector3(0, -0.6, 0);
+      for (var i = 0; i < n; i++) {
+        var a = i / n * Math.PI + 0.3, b0 = buf.n;
+        for (var r = 0; r <= 2; r++) for (var c = 0; c < 2; c++) {
+          var t = r / 2, w = (c - 0.5) * W, px = Math.cos(a) * w + Math.cos(a + 1.57) * t * t * 0.08, pz = Math.sin(a) * w + Math.sin(a + 1.57) * t * t * 0.08, py = t * Hh;
+          _cn.set(px * 0.5, 1, pz * 0.5).normalize();
+          var uv = uvR(reg, c, 1 - t), k = 0.45 + 0.55 * t;
+          buf.v(px, py, pz, _cn.x, _cn.y, _cn.z, uv[0], uv[1], k, k, k);
+        }
+        for (r = 0; r < 2; r++) { var q = b0 + r * 2; buf.tri(q, q + 1, q + 2); buf.tri(q + 1, q + 3, q + 2); }
+      }
+      return finishVeg(buf);
+    });
+  }
+  /** (re)create the near-player grass for the current map (called by core after the terrain is built) */
+  G.initGrass = function (map) {
+    grassSys.mesh = null; grassSys.cx = grassSys.cz = 1e9;
+    if (!map || map.grass === false || !HG.terrain.grassW) return;
+    var lvl = G.level(), dens = map.grassDensity == null ? 1 : map.grassDensity;
+    grassSys.radius = lvl === 'low' ? 16 : lvl === 'ultra' ? 38 : 27;
+    grassSys.spacing = (lvl === 'low' ? 1.05 : lvl === 'ultra' ? 0.62 : 0.78) / Math.sqrt(Math.max(0.2, dens));
+    var R = grassSys.radius + 3, cap = Math.ceil(Math.PI * R * R / (grassSys.spacing * grassSys.spacing) * 1.05) + 16;
+    var im = new THREE.InstancedMesh(grassClumpGeo(), G.vegMaterial('grass'), cap);
+    im.count = 0; im.frustumCulled = false; im.receiveShadow = !G.isLow(); im.castShadow = false; im.name = 'grass';
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3).fill(1), 3); im.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    grassSys.mesh = im; grassSys.cap = cap;
+    HG.mapRoot.add(im);
+    G.setGrassFade(grassSys.radius - 5, grassSys.radius);
+    if (map.grassColor) grassSys.tint = G.color(map.grassColor); else grassSys.tint = null;
+  };
+  /** per frame (cheap): rebuild instances when the player moved ~2.5 m */
+  G.updateGrass = function (px, pz) {
+    var gs = grassSys, im = gs.mesh; if (!im || !HG.terrain.ready) return;
+    if ((px - gs.cx) * (px - gs.cx) + (pz - gs.cz) * (pz - gs.cz) < 6.25) return;
+    gs.cx = px; gs.cz = pz;
+    var T = HG.terrain, sp = gs.spacing, R = gs.radius + 3, R2 = R * R, n = 0, arr = im.instanceMatrix.array, col = im.instanceColor.array;
+    var i0 = Math.floor((px - R) / sp), i1 = Math.ceil((px + R) / sp), j0 = Math.floor((pz - R) / sp), j1 = Math.ceil((pz + R) / sp);
+    var half = T.size / 2, seg = T.seg, cell = T.cell, row = seg + 1, gw = T.grassW, tint = T.tint, wl = T.waterLevel;
+    for (var j = j0; j <= j1 && n < gs.cap; j++) for (var i = i0; i <= i1 && n < gs.cap; i++) {
+      var h1 = hash2(i, j, 71), h2 = hash2(i, j, 72);
+      var x = (i + h1) * sp, z = (j + h2) * sp, dx = x - px, dz = z - pz;
+      if (dx * dx + dz * dz > R2) continue;
+      var gx = (x + half) / cell, gz = (z + half) / cell; if (gx < 0 || gz < 0 || gx >= seg || gz >= seg) continue;
+      var vi = Math.round(gz) * row + Math.round(gx), w = gw[vi];
+      var h3 = hash2(i, j, 73);
+      if (w < 0.35 + h3 * 0.3) continue;
+      var y = T.heightAt(x, z); if (y < wl + 0.25) continue;
+      var s = (0.65 + hash2(i, j, 74) * 0.6) * U.smooth(0.35, 0.8, w), rot = h3 * 6.283, cs = Math.cos(rot) * s, sn = Math.sin(rot) * s, sy = s * (0.8 + h1 * 0.5);
+      var o = n * 16;
+      arr[o] = cs; arr[o + 1] = 0; arr[o + 2] = -sn; arr[o + 3] = 0;
+      arr[o + 4] = 0; arr[o + 5] = sy; arr[o + 6] = 0; arr[o + 7] = 0;
+      arr[o + 8] = sn; arr[o + 9] = 0; arr[o + 10] = cs; arr[o + 11] = 0;
+      arr[o + 12] = x; arr[o + 13] = y - 0.03; arr[o + 14] = z; arr[o + 15] = 1;
+      var k = 0.8 + hash2(i, j, 75) * 0.35, c3 = vi * 3;
+      if (gs.tint) { col[n * 3] = gs.tint.r * k; col[n * 3 + 1] = gs.tint.g * k; col[n * 3 + 2] = gs.tint.b * k; }
+      else { col[n * 3] = tint[c3] * k; col[n * 3 + 1] = tint[c3 + 1] * k; col[n * 3 + 2] = tint[c3 + 2] * k; }
+      n++;
+    }
+    im.count = n; im.instanceMatrix.needsUpdate = true; im.instanceColor.needsUpdate = true;
+  };
+  /* ---------------- first-person hands (gloves + sleeves) ---------------- */
+  var HAND_POSES = G.handPoses = {
+    open: { curl: [0.1, 0.1, 0.12, 0.15], thumb: 0.15, spread: 0.12 },
+    grip: { curl: [0.82, 0.86, 0.88, 0.9], thumb: 0.75, spread: 0.02 },
+    trigger: { curl: [0.38, 0.86, 0.88, 0.9], thumb: 0.75, spread: 0.03, index: [0.55, 0.45, 0.2] },
+    support: { curl: [0.55, 0.6, 0.62, 0.66], thumb: 0.35, spread: 0.06 },
+    fist: { curl: [1, 1, 1, 1], thumb: 0.9, spread: 0 },
+    pinch: { curl: [0.62, 0.7, 0.8, 0.85], thumb: 0.62, spread: 0.02 }
+  };
+  var _hq = new THREE.Quaternion(), _hv = new THREE.Vector3(), _hax = new THREE.Vector3(1, 0, 0);
+  /** Right-hand geometry: wrist at origin, fingers toward -z, palm facing -y, thumb on -x. pose: name or {curl:[i,m,r,p], thumb, spread, index:[mcp,pip,dip]} */
+  G.handGeometry = function (pose, opts) {
+    opts = opts || {};
+    var P = typeof pose === 'string' ? (HAND_POSES[pose] || HAND_POSES.grip) : (pose || HAND_POSES.grip);
+    var lo = !!opts.low, R = lo ? 6 : 10, parts = [], g = opts.glove == null ? 0.0016 : opts.glove;
+    var palmL = 0.088;
+    parts.push(G.organicBody([
+      { p: [0, 0.002, 0.012], w: 0.056, hUp: 0.02, hDown: 0.02, sq: 2.4 },
+      { p: [0, 0.003, -0.02], w: 0.074, hUp: 0.018, hDown: 0.017, sq: 2.8 },
+      { p: [0.002, 0.002, -0.055], w: 0.084, hUp: 0.015, hDown: 0.016, sq: 3.0 },
+      { p: [0.002, 0.0, -palmL + 0.006], w: 0.084, hUp: 0.013, hDown: 0.014, sq: 2.6 },
+      { p: [0.002, -0.001, -palmL - 0.004], w: 0.07, hUp: 0.008, hDown: 0.009, sq: 2.2 }
+    ], { radial: lo ? 10 : 18, steps: lo ? 2 : 3, density: 18, smooth: 1 }));
+    var fingers = [
+      { x: -0.028, L: [0.042, 0.025, 0.02], r: 0.0088, k: 0 }, { x: -0.009, L: [0.047, 0.029, 0.021], r: 0.009, k: 1 },
+      { x: 0.01, L: [0.044, 0.027, 0.02], r: 0.0086, k: 2 }, { x: 0.028, L: [0.035, 0.021, 0.018], r: 0.0076, k: 3 }
+    ];
+    var maxB = [1.45, 1.65, 1.15];
+    fingers.forEach(function (f) {
+      var c = P.curl[f.k], bends = (f.k === 0 && P.index) ? [P.index[0] * maxB[0], P.index[1] * maxB[1], P.index[2] * maxB[2]] : [c * maxB[0], c * maxB[1] * 1.02, c * maxB[2]];
+      var spread = (f.k - 1.5) * (P.spread || 0) * 0.6;
+      var pts = [[f.x * 0.95, 0.001, -palmL + 0.016]], cur = new THREE.Vector3(f.x, 0, -palmL), ang = 0;
+      pts.push([cur.x, cur.y, cur.z]);
+      for (var s = 0; s < 3; s++) {
+        ang += bends[s];
+        _hv.set(Math.sin(spread) , -Math.sin(ang), -Math.cos(ang)).normalize();
+        cur.addScaledVector(_hv, f.L[s]); pts.push([cur.x, cur.y, cur.z]);
+      }
+      var rr = f.r + g;
+      parts.push(G.tube(pts, [rr * 1.08, rr * 1.05, rr * 0.98, rr * 0.92, rr * 0.82], { radial: R, steps: lo ? 2 : 3, density: 30, capBulge: 0.9, capStart: false }));
+    });
+    // thumb: from the base of the palm (index side), opposes with curl
+    var tc = P.thumb, tb = new THREE.Vector3(-0.026, -0.009, -0.012), td = new THREE.Vector3(-0.62, -0.32, -0.72).normalize(), ax = new THREE.Vector3(0.35, -0.35, -0.87).normalize();
+    var tpts = [[tb.x * 0.6, -0.004, tb.z + 0.012], [tb.x, tb.y, tb.z]], tl = [0.04, 0.034, 0.028];
+    for (var j = 0; j < 3; j++) { _hq.setFromAxisAngle(ax, -tc * (j === 0 ? 0.7 : 0.6)); td.applyQuaternion(_hq); tb.addScaledVector(td, tl[j]); tpts.push([tb.x, tb.y, tb.z]); }
+    parts.push(G.tube(tpts, [0.014 + g, 0.0125 + g, 0.0108 + g, 0.0098 + g, 0.0088 + g], { radial: R, steps: lo ? 2 : 3, density: 30, capBulge: 0.9, capStart: false }));
+    // glove cuff
+    parts.push(G.tube([[0, 0.002, 0.03], [0, 0.002, 0.0], [0, 0.002, -0.015]], [0.036, 0.034, 0.03], { radial: lo ? 10 : 16, steps: 2, density: 16, capStart: false, capEnd: false, sq: 2.3 }));
+    var geo = G.merge(parts);
+    G.vertexAO(geo, { cells: 9, strength: 0.7, min: 0.55, under: 0.1 });
+    if (opts.left) G.mirrorX(geo);
+    return geo;
+  };
+  /** Sleeve from the wrist back along dir (forearm) */
+  G.sleeveGeometry = function (len, dir, opts) {
+    opts = opts || {};
+    var d = new THREE.Vector3(dir[0], dir[1], dir[2]).normalize(), pts = [], radii = [];
+    for (var i = 0; i <= 6; i++) { var t = i / 6; pts.push([d.x * len * t, d.y * len * t, d.z * len * t]); radii.push(0.039 + t * 0.016 + (i === 1 ? 0.004 : 0)); }
+    var g = G.tube(pts, radii, { radial: 16, steps: 3, density: 9, capStart: false, capEnd: false, sq: 2.2, displace: function (v, t, th) { var k = Math.sin(th * 3 + t * 9) * 0.0025 + Math.sin(th * 5 - t * 14) * 0.0018; v.x += Math.cos(th) * k; v.y += Math.sin(th) * k; } });
+    G.vertexAO(g, { cells: 6, strength: 0.4, min: 0.6 });
+    return g;
+  };
+  function gloveMats() {
+    var oc = HG.getOutfitColors ? HG.getOutfitColors() : { sleeve: '#55613a', cuff: '#ff8a1f', glove: '#3b2a1e' };
+    var gl = TX.leather({ base: oc.glove || '#3b2a1e' });
+    var sleeveTex = oc.pattern ? TX.camo({ pattern: oc.pattern, palette: oc.palette }) : TX.fabric({ base: '#ffffff' });
+    return {
+      glove: G.mat({ map: gl, normalMap: G.isLow() ? null : TX.normalOf(gl, 2), normalScale: 0.7, roughness: 0.62, vertexColors: true, key: 'glove:' + oc.glove }),
+      sleeve: G.mat({ map: sleeveTex, color: oc.pattern ? '#ffffff' : (oc.sleeve || '#55613a'), roughness: 0.9, vertexColors: true, key: 'sleeve:' + oc.sleeve + ':' + oc.pattern }),
+      cuff: oc.cuff
+    };
+  }
+  /** First-person arms for a view model. cfg: {right:{pos:[x,y,z], basis:[[xAxis],[yAxis]] or rot:[x,y,z], pose, arm:[dx,dy,dz], armLen}, left:{...}} -> Group (weapon space) */
+  G.fpArms = function (cfg) {
+    var grp = new THREE.Group(), M2 = gloveMats();
+    ['right', 'left'].forEach(function (side) {
+      var c = cfg && cfg[side]; if (!c) return;
+      var hand = new THREE.Group();
+      var hg = G.handGeometry(c.pose || 'grip', { left: side === 'left' });
+      var hm = new THREE.Mesh(hg, M2.glove); hand.add(hm);
+      if (c.basis) { var bx = new THREE.Vector3().fromArray(c.basis[0]).normalize(), by = new THREE.Vector3().fromArray(c.basis[1]).normalize(); var bz = new THREE.Vector3().crossVectors(bx, by).normalize(); by.crossVectors(bz, bx); hand.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(bx, by, bz)); }
+      else if (c.rot) hand.rotation.set(c.rot[0], c.rot[1], c.rot[2]);
+      hand.position.fromArray(c.pos);
+      grp.add(hand);
+      if (c.arm) {
+        var sg = G.sleeveGeometry(c.armLen || 0.34, c.arm);
+        G.paint(sg, function (col, x, y, z) { var t = Math.sqrt(x * x + y * y + z * z); col.set(t < 0.035 && !M2.sleeve.map.userData.camo ? (M2.cuff || '#ff8a1f') : '#ffffff'); }, { multiply: true });
+        var sm = new THREE.Mesh(sg, M2.sleeve); sm.position.fromArray(c.pos); sm.position.add(new THREE.Vector3(0, 0.002, 0.018).applyQuaternion(hand.quaternion)); grp.add(sm);
+      }
+      grp.userData[side] = hand;
+    });
+    return grp;
+  };
+
+  /* ---------------- extra textures for props ---------------- */
+  TX.planks = function (o) {
+    o = o || {};
+    var size = texSize(512);
+    return cached('planks' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), x = c.getContext('2d'), rng = U.rng(o.seed || 19), n = o.boards || 6, bw = size / n, base = o.base || '#7a5a3c';
+      var wood = TX.woodGrain({ base: base, dark: shade(base, 0.55), light: shade(base, 1.3), size: [256, 1024], seed: 3 }).image;
+      for (var i = 0; i < n; i++) { var off = rng() * size; x.drawImage(wood, 0, 0, wood.width, wood.height, i * bw, -off, bw, size * 1.6); x.drawImage(wood, 0, 0, wood.width, wood.height, i * bw, size * 1.6 - off, bw, size * 1.6); x.fillStyle = 'rgba(0,0,0,' + (0.05 + rng() * 0.12) + ')'; x.fillRect(i * bw, 0, bw, size); x.fillStyle = 'rgba(20,12,6,.75)'; x.fillRect(i * bw, 0, Math.max(2, bw * 0.04), size); }
+      noiseOverlay(x, size, size, 4, 4, 0.35, 23, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  TX.shingles = function (o) {
+    o = o || {};
+    var size = texSize(512);
+    return cached('shingles' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), x = c.getContext('2d'), rng = U.rng(7), rows = 10, rh = size / rows, base = o.base || '#5e4636';
+      x.fillStyle = shade(base, 0.4); x.fillRect(0, 0, size, size);
+      for (var r = 0; r < rows; r++) { var xx = (r % 2) * -rh * 0.6; while (xx < size) { var w = rh * (0.8 + rng() * 0.9); var g = x.createLinearGradient(0, r * rh, 0, r * rh + rh); var cc = shade(base, 0.75 + rng() * 0.5); g.addColorStop(0, shade(cc, 0.7)); g.addColorStop(1, cc); x.fillStyle = g; x.fillRect(xx + 1, r * rh, w - 2, rh * 1.05); x.fillStyle = 'rgba(0,0,0,.35)'; x.fillRect(xx + 1, r * rh + rh - 3, w - 2, 3); xx += w; } }
+      strands(x, size, size, 2500, rng, { len: [6, 20], alpha: 0.15, spread: 0.1 });
+      noiseOverlay(x, size, size, 4, 4, 0.4, 5, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  TX.stone = function (o) {
+    o = o || {};
+    var size = texSize(512);
+    return cached('stone' + JSON.stringify(o) + size, function () {
+      var c = mkCanvas(size), x = c.getContext('2d'), rng = U.rng(17);
+      x.fillStyle = '#4a4740'; x.fillRect(0, 0, size, size);
+      var rows = 8, rh = size / rows;
+      for (var r = 0; r < rows; r++) { var xx = (r % 2) * rh * 0.5 - rh; while (xx < size) { var w = rh * (1 + rng() * 0.9), cc = ['#8a867c', '#7a756b', '#9a958a', '#6f6a62'][Math.floor(rng() * 4)]; x.fillStyle = cc; x.beginPath(); x.ellipse(xx + w / 2, r * rh + rh / 2, w / 2 - 2, rh / 2 - 2, (rng() - 0.5) * 0.2, 0, 6.283); x.fill(); x.fillStyle = 'rgba(255,255,255,.08)'; x.beginPath(); x.ellipse(xx + w / 2 - 3, r * rh + rh / 2 - 3, w / 3, rh / 4, 0, 0, 6.283); x.fill(); xx += w; } }
+      noiseOverlay(x, size, size, 6, 4, 0.45, 9, 'soft-light');
+      var t = finishTex(new THREE.CanvasTexture(c)); t.userData.canvas = c; return t;
+    });
+  };
+  /** Fallen log / stump builder using the vegetation atlas bark. o: {len:4, r:0.28, seed, stump:false} */
+  TREES.log = function (o) {
+    o = o || {};
+    return cached('log:' + JSON.stringify(o), function () {
+      var rng = U.rng(o.seed || 2), buf = new MeshBuf(), R = ATLAS_R.barkPine, C = new THREE.Vector3(0, 2, 0);
+      if (o.stump) { addTrunk(buf, [[0, -0.1, 0], [0, (o.h || 0.5) * 0.5, 0], [0, o.h || 0.5, 0]], [(o.r || 0.3) * 1.3, o.r || 0.3, (o.r || 0.3) * 0.96], R, 9, 0.6, 0.9, 2); }
+      else {
+        var L = o.len || 4, r = o.r || 0.28, pts = [], rad = [];
+        for (var i = 0; i <= 4; i++) { var t = i / 4; pts.push([-L / 2 + L * t, r * 0.85 + (rng() - 0.5) * 0.04, (rng() - 0.5) * 0.06]); rad.push(r * (1.08 - t * 0.25)); }
+        addTrunk(buf, pts, rad, R, 9, 0.62, 0.85, 2);
+        _cp.set(L * 0.1, r * 1.4, 0); _cx.set(0.3, 0.9, 0.2).normalize(); _cy.set(1, 0, 0);
+        cardStrip(buf, _cp, _cx, _cy, 0.9, 0.6, 1, 0, ATLAS_R.twigs, C, 0.7, 0.85, 0.3);
+      }
+      return { geometry: finishVeg(buf), material: G.vegMaterial('tree'), castShadow: true };
+    });
+  };
+
+  /* ---------------- whitetail deer + cottontail templates ---------------- */
+  function cl(c, hex) { return c.set(hex); }
+  function deerSpec(buck) {
+    var k = buck ? 1 : 0.93, L = function (v) { return v * k; };
+    var poll = [0, L(1.34), L(-0.78)];
+    var hd = new THREE.Vector3(0, -0.62, -0.785).normalize(); // head axis (forward/down)
+    function hp(t, up) { return [0, poll[1] + hd.y * t * k + (up || 0) * k, poll[2] + hd.z * t * k]; }
+    var spine = [
+      { p: [0, L(0.84), L(0.67)], w: L(0.13), hUp: L(0.07), hDown: L(0.1) },
+      { p: [0, L(0.83), L(0.56)], w: L(0.27), hUp: L(0.12), hDown: L(0.19), bone: 'pelvis' },
+      { p: [0, L(0.81), L(0.36)], w: L(0.3), hUp: L(0.14), hDown: L(0.19) },
+      { p: [0, L(0.79), L(0.12)], w: L(0.31), hUp: L(0.155), hDown: L(0.195), bone: 'spine' },
+      { p: [0, L(0.795), L(-0.12)], w: L(0.31), hUp: L(0.18), hDown: L(0.235) },
+      { p: [0, L(0.81), L(-0.3)], w: L(0.29), hUp: L(0.19), hDown: L(0.245), bone: 'chest' },
+      { p: [0, L(0.85), L(-0.44)], w: L(0.23), hUp: L(0.15), hDown: L(0.22) },
+      { p: [0, L(0.95), L(-0.54)], w: L(buck ? 0.18 : 0.155), hUp: L(0.1), hDown: L(0.15), bone: 'neck1' },
+      { p: [0, L(1.08), L(-0.62)], w: L(buck ? 0.145 : 0.12), hUp: L(0.075), hDown: L(0.105) },
+      { p: [0, L(1.2), L(-0.7)], w: L(buck ? 0.125 : 0.105), hUp: L(0.065), hDown: L(0.085), bone: 'neck2' },
+      { p: [0, L(1.3), L(-0.76)], w: L(0.11), hUp: L(0.06), hDown: L(0.072) },
+      { p: poll, w: L(0.1), hUp: L(0.055), hDown: L(0.06) }
+    ];
+    var head = [
+      { p: hp(-0.045, 0.01), w: L(0.085), hUp: L(0.05), hDown: L(0.05) },
+      { p: hp(0.01, 0.012), w: L(0.12), hUp: L(0.062), hDown: L(0.07) },
+      { p: hp(0.07, 0.008), w: L(0.13), hUp: L(0.06), hDown: L(0.068) },
+      { p: hp(0.13, 0.0), w: L(0.1), hUp: L(0.047), hDown: L(0.06) },
+      { p: hp(0.19, -0.006), w: L(0.074), hUp: L(0.038), hDown: L(0.05) },
+      { p: hp(0.245, -0.01), w: L(0.062), hUp: L(0.033), hDown: L(0.043) },
+      { p: hp(0.285, -0.012), w: L(0.058), hUp: L(0.03), hDown: L(0.037) },
+      { p: hp(0.305, -0.012), w: L(0.04), hUp: L(0.02), hDown: L(0.025) }
+    ];
+    var FR = [
+      { p: [L(0.1), L(0.86), L(-0.34)], r: L(0.06) },
+      { p: [L(0.115), L(0.72), L(-0.4)], rx: L(0.062), rz: L(0.085) },
+      { p: [L(0.112), L(0.55), L(-0.34)], rx: L(0.045), rz: L(0.055) },
+      { p: [L(0.1), L(0.3), L(-0.355)], rx: L(0.026), rz: L(0.034) },
+      { p: [L(0.1), L(0.085), L(-0.37)], rx: L(0.02), rz: L(0.025) },
+      { p: [L(0.1), L(0.02), L(-0.395)], rx: L(0.019), rz: L(0.024) }
+    ];
+    var BR = [
+      { p: [L(0.09), L(0.86), L(0.48)], r: L(0.08) },
+      { p: [L(0.115), L(0.76), L(0.47)], rx: L(0.085), rz: L(0.125) },
+      { p: [L(0.12), L(0.55), L(0.33)], rx: L(0.06), rz: L(0.085) },
+      { p: [L(0.1), L(0.38), L(0.5)], rx: L(0.03), rz: L(0.048) },
+      { p: [L(0.1), L(0.095), L(0.45)], rx: L(0.02), rz: L(0.026) },
+      { p: [L(0.1), L(0.02), L(0.425)], rx: L(0.019), rz: L(0.024) }
+    ];
+    var COAT = buck ? '#86684b' : '#8f7255', BACK = buck ? '#62492f' : '#6d5439', LEGC = '#9c7f60', WHITE = '#f1ece3', NOSE = '#161212', FACE = buck ? '#59432f' : '#6d543c';
+    var A = new THREE.Color(), B = new THREE.Color();
+    function coat(c, x, y, z, nx, ny, nz, part, u, v) {
+      if (part === 'hoof') return cl(c, '#1c1713');
+      if (part === 'ear') { if (u > 0.5) { A.set('#efe6da'); B.set('#4a3a2c'); return c.copy(A).lerp(B, U.smooth(0.55, 0.95, Math.abs(x) > 0 ? 0 : 0)); } A.set('#7e6650'); return c.copy(A).lerp(B.set('#3c2e22'), U.smooth(0.82, 1, v)); }
+      if (part === 'tail') { A.set(BACK); if (ny < -0.1 || nz > 0.6 && ny < 0.3) A.lerp(B.set(WHITE), U.smooth(-0.1, -0.5, ny) + (nz > 0.6 ? 0.2 : 0)); if (Math.abs(nx) > 0.75) A.lerp(B.set('#3d2b1c'), 0.5); return c.copy(A); }
+      A.set(COAT).lerp(B.set(BACK), U.smooth(0.35, 0.95, ny));
+      if (part === 'body') {
+        A.lerp(B.set(WHITE), U.smooth(-0.35, -0.75, ny) * U.smooth(0.62, 0.5, z) * U.smooth(-0.62, -0.5, z));
+        A.lerp(B.set('#a58665'), U.smooth(0.0, -0.35, ny) * 0.35);
+        // white throat patch high on the neck, under the jaw
+        if (y > L(1.12)) A.lerp(B.set(WHITE), U.smooth(-0.15, -0.6, ny + nz * 0.6) * U.smooth(L(1.12), L(1.25), y));
+        // white under the tail / inner rump
+        if (z > L(0.6)) A.lerp(B.set(WHITE), U.smooth(0.2, 0.75, Math.abs(nz)) * U.smooth(L(0.88), L(0.78), y) * 0.7);
+        if (z > L(0.58) && y > L(0.8)) A.lerp(B.set('#5a4330'), 0.2);
+      } else if (part === 'head') {
+        var t = ((y - poll[1]) * hd.y + (z - poll[2]) * hd.z) / k;
+        A.lerp(B.set(FACE), U.smooth(0.3, 0.85, ny) * U.smooth(-0.02, 0.12, t) * 0.75);
+        A.lerp(B.set('#9a826a'), U.smooth(0.17, 0.25, t) * 0.5);
+        var band = U.smooth(0.235, 0.25, t) * U.smooth(0.29, 0.272, t);
+        A.lerp(B.set(WHITE), band * 0.92 + U.smooth(0.0, -0.7, ny) * U.smooth(0.17, 0.26, t) * 0.9);
+        if (t > 0.276) A.lerp(B.set(NOSE), U.smooth(0.276, 0.29, t) * U.smooth(-0.5, 0.2, ny + 0.4));
+        var ex = Math.abs(x) - L(0.057), ey = y - (poll[1] + hd.y * 0.07 * k + 0.03 * k), ez = z - (poll[2] + hd.z * 0.07 * k);
+        var ed = Math.sqrt(ex * ex * 2 + ey * ey + ez * ez); A.lerp(B.set('#e9e2d4'), U.smooth(0.03, 0.018, ed) * 0.8);
+      } else {
+        var front = part === 'legF';
+        A.lerp(B.set(LEGC), U.smooth(L(0.5), L(0.3), y) * 0.8);
+        A.lerp(B.set(WHITE), U.smooth(0.2, 0.8, -nx * (x > 0 ? 1 : -1)) * U.smooth(L(0.7), L(0.45), y) * 0.65);
+        if (!front) A.lerp(B.set('#4a3626'), U.smooth(0.03, 0.0, Math.abs(y - L(0.37))) * U.smooth(0.3, 0.8, nz) * 0.6);
+        A.lerp(B.set('#3a2b20'), U.smooth(L(0.14), L(0.05), y) * 0.55);
+      }
+      return c.copy(A);
+    }
+    var spec = {
+      key: buck ? 'whitetail_buck' : 'whitetail_doe', spine: spine, head: head, legs: { FR: FR, BR: BR },
+      hoof: { w: L(0.046), l: L(0.062), h: L(0.05) },
+      ears: { p: [L(0.05), poll[1] + L(0.035), poll[2] + L(0.01)], len: L(0.16), width: L(0.085), cup: 0.42, tip: 0.55, rot: [0.25, 0.25, -0.95] },
+      tail: { p: [0, L(0.88), L(0.66)], len: L(0.24), w: L(0.105), h: L(0.04), droop: 1.3 },
+      eyes: { p: [L(0.058), poll[1] + hd.y * 0.07 * k + L(0.028), poll[2] + hd.z * 0.07 * k], r: L(0.017), rot: 0.5, color: '#120c08' },
+      nose: { p: [0, poll[1] + hd.y * 0.302 * k - L(0.006), poll[2] + hd.z * 0.302 * k], r: L(0.022), sx: 1.2, sy: 0.75, sz: 0.65 },
+      coat: coat, fur: { strokes: 13000, length: [5, 12], alpha: 0.28 }, roughness: 0.86, density: 2.6,
+      gaits: ['walk', 'trot', 'gallop'], speeds: [2.1, 4.8],
+      poses: { idle: [0, 0, 0], walk: [-0.2, -0.02, 0.1], run: [-0.42, -0.05, 0.28], alert: [0.18, 0.08, -0.12], graze: [-1.22, -0.42, 0.62] },
+      tailLift: 2.0, earFwd: 0.4, lodDist: 46,
+      attach: buck ? function () {
+        var out = [], base = [L(0.042), poll[1] + L(0.062), poll[2] + L(0.03)];
+        [2, 3, 4].forEach(function (tines) {
+          var s = 0.85 + tines * 0.08, geos = [];
+          [1, -1].forEach(function (sd) {
+            var b = [base[0] * sd, base[1], base[2]];
+            function P(x, y, z) { return [b[0] + sd * x * s, b[1] + y * s, b[2] + z * s]; }
+            var spec2 = { base: b, beam: [P(0.05, 0.07, 0.05), P(0.14, 0.13, 0.04), P(0.19, 0.15, -0.06), P(0.16, 0.14, -0.18), P(0.08, 0.13, -0.25)], r: [0.021 * s, 0.006], seg: 18, radial: 7,
+              tines: [{ t: 0.08, dir: [sd * 0.15, 1, -0.35], len: 0.07 * s, r: 0.009 }] };
+            if (tines >= 2) spec2.tines.push({ t: 0.4, dir: [-sd * 0.05, 1, 0.08], len: 0.2 * s, r: 0.011, bend: [-sd * 0.02, 0, -0.02] });
+            if (tines >= 3) spec2.tines.push({ t: 0.62, dir: [-sd * 0.12, 1, 0.05], len: 0.16 * s, r: 0.01, bend: [-sd * 0.02, 0, -0.02] });
+            if (tines >= 4) spec2.tines.push({ t: 0.8, dir: [-sd * 0.2, 1, 0.0], len: 0.11 * s, r: 0.008 });
+            var gg = G.antler(spec2, 1); geos.push(gg);
+          });
+          var ag = G.merge(geos);
+          G.paint(ag, function (c, x, y, z) { var hgt = (y - base[1]) / (0.3 * s); c.set('#5d4630').lerp(A.set('#ede4cf'), U.smooth(0.0, 0.75, hgt)); });
+          out.push({ bone: 'head', geometry: ag, material: G.mat({ map: TX.antler(), vertexColors: true, roughness: 0.55, key: 'antler' }), variant: tines });
+        });
+        return out;
+      } : null
+    };
+    return spec;
+  }
+  G.deerSpec = deerSpec;
+  function rabbitSpec() {
+    var poll = [0, 0.205, -0.17], hd = new THREE.Vector3(0, -0.42, -0.9).normalize();
+    function hp(t, up) { return [0, poll[1] + hd.y * t + (up || 0), poll[2] + hd.z * t]; }
+    var FUR = '#8c7a64', BACK = '#6d5e4c', BELLY = '#ece6da', WHITE = '#f7f4ee', A = new THREE.Color(), B = new THREE.Color();
+    return {
+      key: 'cottontail',
+      spine: [
+        { p: [0, 0.12, 0.14], w: 0.09, hUp: 0.05, hDown: 0.06 },
+        { p: [0, 0.135, 0.09], w: 0.16, hUp: 0.085, hDown: 0.08, bone: 'pelvis' },
+        { p: [0, 0.145, 0.02], w: 0.165, hUp: 0.09, hDown: 0.085, bone: 'spine' },
+        { p: [0, 0.14, -0.06], w: 0.14, hUp: 0.08, hDown: 0.08, bone: 'chest' },
+        { p: [0, 0.145, -0.12], w: 0.11, hUp: 0.06, hDown: 0.065 },
+        { p: [0, 0.165, -0.15], w: 0.085, hUp: 0.045, hDown: 0.05, bone: 'neck1' },
+        { p: [0, 0.188, -0.163], w: 0.075, hUp: 0.04, hDown: 0.042, bone: 'neck2' },
+        { p: poll, w: 0.07, hUp: 0.037, hDown: 0.038 }
+      ],
+      head: [
+        { p: hp(-0.015, 0.004), w: 0.066, hUp: 0.038, hDown: 0.038 },
+        { p: hp(0.02, 0.006), w: 0.084, hUp: 0.047, hDown: 0.048 },
+        { p: hp(0.05, 0.003), w: 0.074, hUp: 0.04, hDown: 0.045 },
+        { p: hp(0.075, -0.002), w: 0.052, hUp: 0.03, hDown: 0.033 },
+        { p: hp(0.092, -0.004), w: 0.032, hUp: 0.018, hDown: 0.02 },
+        { p: hp(0.1, -0.005), w: 0.016, hUp: 0.008, hDown: 0.01 }
+      ],
+      legs: {
+        FR: [{ p: [0.03, 0.12, -0.09], r: 0.022 }, { p: [0.036, 0.095, -0.105], r: 0.02 }, { p: [0.036, 0.06, -0.1], r: 0.015 }, { p: [0.034, 0.03, -0.115], r: 0.011 }, { p: [0.034, 0.012, -0.13], r: 0.01 }, { p: [0.034, 0.008, -0.15], r: 0.009 }],
+        BR: [{ p: [0.045, 0.14, 0.09], r: 0.04 }, { p: [0.058, 0.12, 0.07], rx: 0.042, rz: 0.055 }, { p: [0.066, 0.06, 0.01], rx: 0.03, rz: 0.035 }, { p: [0.062, 0.022, 0.1], rx: 0.016, rz: 0.02 }, { p: [0.058, 0.012, 0.02], rx: 0.015, rz: 0.012 }, { p: [0.056, 0.01, -0.035], rx: 0.013, rz: 0.01 }]
+      },
+      feet: false,
+      ears: { p: [0.022, poll[1] + 0.03, poll[2] + 0.012], len: 0.085, width: 0.038, cup: 0.55, tip: 0.1, rot: [0.25, 0.15, -0.2] },
+      tail: { p: [0, 0.135, 0.14], len: 0.06, w: 0.06, h: 0.055, droop: -0.4, bushy: true },
+      eyes: { p: [0.031, poll[1] + hd.y * 0.035 + 0.012, poll[2] + hd.z * 0.035], r: 0.0105, rot: 0.6, color: '#0e0906' },
+      nose: { p: [0, poll[1] + hd.y * 0.098 - 0.002, poll[2] + hd.z * 0.098], r: 0.008, color: '#c99a95', sx: 1.1, sy: 0.7, sz: 0.6 },
+      coat: function (c, x, y, z, nx, ny, nz, part, u) {
+        if (part === 'tail') return cl(c, WHITE);
+        if (part === 'ear') { if (u > 0.5) return cl(c, '#d7b3a5'); A.set(BACK); return c.copy(A); }
+        A.set(FUR).lerp(B.set(BACK), U.smooth(0.4, 0.95, ny));
+        A.lerp(B.set(BELLY), U.smooth(-0.3, -0.75, ny));
+        if (part === 'head') { var t = (y - poll[1]) * hd.y + (z - poll[2]) * hd.z; A.lerp(B.set('#b5a089'), U.smooth(0.05, 0.09, t) * 0.4); var ex = Math.abs(x) - 0.031, ey = y - (poll[1] + hd.y * 0.035 + 0.012), ez = z - (poll[2] + hd.z * 0.035); A.lerp(B.set('#e8dfd0'), U.smooth(0.017, 0.01, Math.sqrt(ex * ex * 2 + ey * ey + ez * ez)) * 0.7); }
+        if (part === 'legF' || part === 'legH') A.lerp(B.set('#c9b8a0'), U.smooth(0.05, 0.015, y) * 0.6);
+        if (part === 'body' && z < -0.12 && y > 0.15) A.lerp(B.set('#a56a3e'), 0.25 * U.smooth(0.0, 0.6, ny));
+        return c.copy(A);
+      },
+      fur: { strokes: 16000, length: [4, 9], alpha: 0.3, seed: 33 }, roughness: 0.9, density: 9,
+      gaits: ['hop', 'hop', 'hop'], speeds: [50, 60], strideMul: 6.5, swingF: 0.5, swingH: 0.55,
+      flexF: [0.3, -0.9, -0.4], flexH: [-0.4, 0.9, -0.5],
+      poses: { idle: [0, 0, 0], walk: [-0.1, 0, 0.05], run: [-0.25, 0, 0.15], alert: [0.25, 0.15, -0.15], graze: [-0.55, -0.2, 0.35] },
+      tailLift: 0.6, tailFlag: 1, earFwd: -0.15, lodDist: 22, ao: 0.8
+    };
+  }
+  G.rabbitSpec = rabbitSpec;
+
   /* ------------------------------------------------------------------
    * Renderer, scenes, cameras
    * ------------------------------------------------------------------ */
   var viewEl = document.getElementById('hg-view');
   var rootEl = document.getElementById('hg-root');
-  HG.quality = { low: HG.settings.graphics === 'low' };
+  /** Graphics level: 'low' (phones: Lambert, no shadows, LOD, fewer instances) | 'high' (Standard + IBL, soft shadows) | 'ultra' (desktop: 2048 shadows, more grass, longer view) */
+  function qualityLevel(g) { return g === 'low' ? 'low' : g === 'ultra' ? 'ultra' : 'high'; }
+  HG.quality = { low: HG.settings.graphics === 'low', level: qualityLevel(HG.settings.graphics), high: HG.settings.graphics !== 'low', ultra: HG.settings.graphics === 'ultra' };
   var renderer;
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -450,7 +2912,20 @@
   }
   renderer.autoClear = false;
   renderer.shadowMap.enabled = false;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+  renderer.info.autoReset = false;
+  G.exposure = 1.0;
+  // subtle colour grade applied after ACES (cool shadows, warm highlights, +8% saturation)
+  (function () {
+    var ch = THREE.ShaderChunk.tonemapping_pars_fragment, re = /(vec3 ACESFilmicToneMapping\( vec3 color \) \{[\s\S]*?)return saturate\( color \);/;
+    if (re.test(ch)) {
+      THREE.ShaderChunk.tonemapping_pars_fragment = ch.replace(re, '$1return hgGrade( saturate( color ) );').replace('vec3 ACESFilmicToneMapping( vec3 color ) {',
+        'vec3 hgGrade( vec3 c ) { float l = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) ); c = mix( vec3( l ), c, 1.08 ); c *= mix( vec3( 0.97, 0.99, 1.03 ), vec3( 1.03, 1.0, 0.965 ), smoothstep( 0.08, 0.75, l ) ); return clamp( c, 0.0, 1.0 ); }\nvec3 ACESFilmicToneMapping( vec3 color ) {');
+    }
+  })();
   viewEl.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-label', 'Wildwood Hunter game view');
 
@@ -470,18 +2945,28 @@
   HG.viewLights = { hemi: vmHemi, sun: vmSun };
 
   HG.applyGraphics = function () {
-    var low = HG.settings.graphics === 'low';
-    if (HG.booted && low !== HG.quality.low) HG._mapDirty = true; // vegetation density is decided at build time
-    HG.quality.low = low;
-    var pr = Math.min(window.devicePixelRatio || 1, low ? 1 : 1.5);
+    var lvl = qualityLevel(HG.settings.graphics), low = lvl === 'low', prev = HG.quality.level;
+    var changed = lvl !== prev;
+    if (HG.booted && changed) HG._mapDirty = true; // materials + vegetation density are decided at build time
+    HG.quality.low = low; HG.quality.level = lvl; HG.quality.high = !low; HG.quality.ultra = lvl === 'ultra';
+    var pr = Math.min(window.devicePixelRatio || 1, low ? 1 : lvl === 'ultra' ? 2 : 1.5);
     renderer.setPixelRatio(pr);
     var wantShadows = !low;
     if (renderer.shadowMap.enabled !== wantShadows) {
       renderer.shadowMap.enabled = wantShadows;
       HG.scene.traverse(function (o) { if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { m.needsUpdate = true; }); } });
     }
+    if (G.configureShadows) G.configureShadows(lvl);
     if (HG.env && HG.env.sun) HG.env.sun.castShadow = wantShadows;
+    if (G.sky) { var oct = low ? 3 : 5; if (G.sky.material.defines.CLOUD_OCT !== oct) { G.sky.material.defines.CLOUD_OCT = oct; G.sky.material.needsUpdate = true; } }
+    if (G.markEnvDirty) { G.markEnvDirty(); if (HG.booted) G.updateEnvMap(true); }
     HG.resize();
+    if (HG.booted && changed && HG.state !== 'hunt' && HG.mapId) {
+      // rebuild the backdrop with the new quality right away
+      HG.loadMap(HG.mapId); HG._mapDirty = false;
+      if (HG.state === 'menu') menuAnimals();
+      if (HG.env) HG.env.apply();
+    }
   };
   HG.resize = function () {
     var w = Math.max(1, viewEl.clientWidth || window.innerWidth), h = Math.max(1, viewEl.clientHeight || window.innerHeight);
@@ -499,53 +2984,136 @@
   window.addEventListener('orientationchange', function () { setTimeout(HG.resize, 200); });
 
   /* ------------------------------------------------------------------
-   * Sky, lights, environment (day/night). worlds.js may upgrade this.
+   * Sky, lights, environment (day/night). Shader sky (HG.gfx.sky), sun + hemisphere,
+   * soft shadows that follow the player (High/Ultra), PMREM sky environment (IBL).
+   * worlds.js may tune HG.gfx.sky.params per map/weather or wrap HG.env.apply.
    * ------------------------------------------------------------------ */
   var skyMat = new THREE.ShaderMaterial({
     uniforms: {
       top: { value: new THREE.Color(0x4f8fd0) }, bottom: { value: new THREE.Color(0xcfe0dc) },
-      sunDir: { value: new THREE.Vector3(0, 1, 0) }, sunColor: { value: new THREE.Color(0xfff0d0) }, sunVis: { value: 1 }
+      sunDir: { value: new THREE.Vector3(0, 1, 0) }, sunColor: { value: new THREE.Color(0xfff0d0) }, sunVis: { value: 1 },
+      moonDir: { value: new THREE.Vector3(0, -1, 0) }, moonVis: { value: 0 }, starVis: { value: 0 }, time: { value: 0 },
+      cloudCover: { value: 0.45 }, cloudScale: { value: 0.85 }, cloudWind: { value: new THREE.Vector2(0.004, 0.0025) },
+      cloudColor: { value: new THREE.Color(0xffffff) }, cloudShade: { value: new THREE.Color(0x9aa6b4) }, cloudSharp: { value: 0.3 },
+      haze: { value: 0.55 }, glow: { value: 1 }, groundColor: { value: new THREE.Color(0x3c4636) }, sunSize: { value: 0.99965 }
     },
+    defines: { CLOUD_OCT: 5 },
     vertexShader: 'varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
     fragmentShader: [
-      'uniform vec3 top; uniform vec3 bottom; uniform vec3 sunDir; uniform vec3 sunColor; uniform float sunVis; varying vec3 vDir;',
-      'void main(){ vec3 d = normalize(vDir); float h = d.y;',
-      ' vec3 col = mix(bottom, top, pow(clamp(h * 1.25 + 0.015, 0.0, 1.0), 0.55));',
-      ' float s = max(dot(d, normalize(sunDir)), 0.0);',
-      ' col += sunColor * sunVis * (smoothstep(0.9993, 0.9997, s) * 1.4 + pow(s, 14.0) * 0.28);',
-      ' gl_FragColor = vec4(col, 1.0); }'
+      'uniform vec3 top; uniform vec3 bottom; uniform vec3 sunDir; uniform vec3 sunColor; uniform float sunVis;',
+      'uniform vec3 moonDir; uniform float moonVis; uniform float starVis; uniform float time;',
+      'uniform float cloudCover; uniform float cloudScale; uniform vec2 cloudWind; uniform vec3 cloudColor; uniform vec3 cloudShade; uniform float cloudSharp;',
+      'uniform float haze; uniform float glow; uniform vec3 groundColor; uniform float sunSize; varying vec3 vDir;',
+      'float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }',
+      'float vn(vec2 p){ vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);',
+      ' return mix(mix(h21(i), h21(i + vec2(1.0, 0.0)), f.x), mix(h21(i + vec2(0.0, 1.0)), h21(i + vec2(1.0, 1.0)), f.x), f.y); }',
+      'float fbm(vec2 p){ float s = 0.0; float a = 0.5; for (int i = 0; i < CLOUD_OCT; i++) { s += a * vn(p); p = p * 2.07 + vec2(1.7, 9.2); a *= 0.5; } return s; }',
+      'void main(){',
+      ' vec3 d = normalize(vDir); float h = d.y; float hp = max(h, 0.0);',
+      ' vec3 col = mix(bottom, top, pow(hp, 0.48));',
+      ' col = mix(col, bottom, haze * exp(-hp * 14.0));',
+      ' float sd = dot(d, sunDir); float sdp = max(sd, 0.0);',
+      ' float horizonK = 0.55 + 0.45 * (1.0 - hp);',
+      ' col += sunColor * sunVis * (pow(sdp, 5.0) * 0.16 * glow + pow(sdp, 42.0) * 0.32 + pow(sdp, 600.0) * 0.8) * horizonK;',
+      ' col += sunColor * sunVis * smoothstep(sunSize - 0.00012, sunSize, sd) * 1.6;',
+      ' if (starVis > 0.01 && h > 0.0) {',
+      '  vec2 g = vec2(atan(d.z, d.x) * 95.0, asin(h) * 95.0); vec2 c = floor(g); float r = h21(c);',
+      '  if (r > 0.986) { vec2 f = fract(g) - 0.5 - (vec2(h21(c + 7.1), h21(c + 3.3)) - 0.5) * 0.6;',
+      '   float s = smoothstep(0.16, 0.0, length(f)) * (r - 0.986) / 0.014 * (0.65 + 0.35 * sin(time * 2.7 + r * 300.0));',
+      '   col += vec3(0.9, 0.95, 1.0) * s * starVis * smoothstep(0.0, 0.25, h); }',
+      ' }',
+      ' float md = dot(d, moonDir);',
+      ' col += vec3(0.32, 0.38, 0.5) * pow(max(md, 0.0), 120.0) * 0.35 * moonVis;',
+      ' col = mix(col, vec3(0.93, 0.93, 0.88), smoothstep(0.99935, 0.99952, md) * moonVis);',
+      ' if (h > 0.0 && cloudCover > 0.01) {',
+      '  vec2 uv = d.xz / (h + 0.09) * cloudScale + cloudWind * time;',
+      '  float n = fbm(uv);',
+      '  #if CLOUD_OCT > 3',
+      '  n = n * 0.72 + fbm(uv * 2.6 + 3.1) * 0.28;',
+      '  #endif',
+      '  float cov = smoothstep(1.0 - cloudCover - cloudSharp * 0.4, 1.0 - cloudCover + cloudSharp, n);',
+      '  cov *= smoothstep(0.0, 0.14, h);',
+      '  float ns = fbm(uv + sunDir.xz * 0.16);',
+      '  float lit = clamp(0.58 + (n - ns) * 2.6, 0.0, 1.0);',
+      '  vec3 cc = mix(cloudShade, cloudColor, lit);',
+      '  cc += sunColor * sunVis * pow(sdp, 9.0) * 0.55 * (1.0 - cov * 0.7);',
+      '  cc = mix(cc, bottom, (1.0 - smoothstep(0.0, 0.35, h)) * 0.55);',
+      '  col = mix(col, cc, cov * 0.94);',
+      ' }',
+      ' if (h < 0.0) col = mix(bottom, groundColor, smoothstep(0.0, -0.2, h));',
+      ' float mxc = max(col.r, max(col.g, col.b)); if (mxc > 1.0) col /= mxc;',
+      ' col += (h21(gl_FragCoord.xy + fract(time)) - 0.5) / 255.0;',
+      ' gl_FragColor = vec4(col, 1.0);',
+      '}'
     ].join('\n'),
     side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false
   });
-  var sky = new THREE.Mesh(new THREE.SphereGeometry(1000, 24, 12), skyMat);
+  skyMat.userData.shared = true;
+  var sky = new THREE.Mesh(new THREE.SphereGeometry(1000, 32, 16), skyMat);
   sky.renderOrder = -1000; sky.frustumCulled = false; sky.name = 'sky';
   HG.scene.add(sky);
+  /** HG.gfx.sky: the sky dome. params are applied by HG.env.apply (worlds.js may change them per map/weather):
+   *  cloudCover 0..1, cloudScale, cloudSpeed (multiplier), cloudSharp, haze 0..1, glow, starBrightness, tint (sRGB colour mixed into the sky) + tintAmount */
+  G.sky = { mesh: sky, material: skyMat, uniforms: skyMat.uniforms,
+    params: { cloudCover: 0.42, cloudScale: 0.85, cloudSpeed: 1, cloudSharp: 0.3, haze: 0.55, glow: 1, starBrightness: 1, tint: null, tintAmount: 0 } };
 
   var hemi = new THREE.HemisphereLight(0xdfefff, 0x5a6b3a, 0.6);
   HG.scene.add(hemi);
   var sun = new THREE.DirectionalLight(0xfff1d6, 1.0);
   sun.shadow.mapSize.set(1024, 1024);
-  sun.shadow.camera.left = -45; sun.shadow.camera.right = 45; sun.shadow.camera.top = 45; sun.shadow.camera.bottom = -45;
-  sun.shadow.camera.near = 10; sun.shadow.camera.far = 260; sun.shadow.bias = -0.0008;
-  if ('normalBias' in sun.shadow) sun.shadow.normalBias = 0.03;
+  sun.shadow.camera.left = -34; sun.shadow.camera.right = 34; sun.shadow.camera.top = 34; sun.shadow.camera.bottom = -34;
+  sun.shadow.camera.near = 20; sun.shadow.camera.far = 320; sun.shadow.bias = -0.0006;
+  if ('normalBias' in sun.shadow) sun.shadow.normalBias = 0.035;
+  sun.shadow.radius = 2;
   HG.scene.add(sun); HG.scene.add(sun.target);
+  G.sun = sun; G.hemi = hemi;
+  /** shadow tuning per quality (called by applyGraphics) */
+  G.configureShadows = function (level) {
+    var size = level === 'ultra' ? 2048 : 1024, ext = level === 'ultra' ? 46 : 32;
+    if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.set(size, size); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } }
+    sun.shadow.camera.left = -ext; sun.shadow.camera.right = ext; sun.shadow.camera.top = ext; sun.shadow.camera.bottom = -ext;
+    sun.shadow.camera.updateProjectionMatrix();
+    G.shadowExtent = ext;
+  };
+  G.shadowExtent = 32;
 
-  // drifting low-poly clouds (persist across maps)
+  // legacy cloud group (kept for API compatibility; clouds are drawn by the sky shader now)
   var clouds = new THREE.Group(); clouds.name = 'clouds';
-  (function () {
-    var r = U.rng(7), cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false, transparent: true, opacity: 0.92 });
-    cloudMat.userData.shared = true;
-    for (var i = 0; i < 12; i++) {
-      var parts = [], n = 3 + Math.floor(r() * 4);
-      for (var j = 0; j < n; j++) parts.push(M.ico(8 + r() * 10, 0, 0xffffff, { pos: [j * 11 - n * 5, r() * 4, (r() - 0.5) * 10], scale: [1.4, 0.55, 1] }));
-      var c = new THREE.Mesh(M.merge(parts), cloudMat);
-      var a = r() * TAU, d = 180 + r() * 300;
-      c.position.set(Math.cos(a) * d, 130 + r() * 50, Math.sin(a) * d); c.rotation.y = r() * TAU;
-      clouds.add(c);
-    }
-    clouds.userData.mat = cloudMat;
-  })();
+  clouds.userData.mat = new THREE.MeshBasicMaterial({ color: 0xffffff }); clouds.userData.mat.userData.shared = true;
   HG.scene.add(clouds);
+
+  /* ---- PMREM sky environment (image based lighting for Standard materials) ---- */
+  var envScene = new THREE.Scene();
+  var envMat = new THREE.ShaderMaterial({
+    uniforms: { top: { value: new THREE.Color() }, bottom: { value: new THREE.Color() }, ground: { value: new THREE.Color() }, sunDir: { value: new THREE.Vector3(0, 1, 0) }, sunColor: { value: new THREE.Color() }, sunVis: { value: 1 } },
+    vertexShader: 'varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: [
+      'uniform vec3 top; uniform vec3 bottom; uniform vec3 ground; uniform vec3 sunDir; uniform vec3 sunColor; uniform float sunVis; varying vec3 vDir;',
+      'vec3 lin(vec3 c){ return pow(c, vec3(2.2)); }',
+      'void main(){ vec3 d = normalize(vDir); float h = d.y;',
+      ' vec3 col = mix(lin(bottom), lin(top), pow(max(h, 0.0), 0.5));',
+      ' float s = max(dot(d, sunDir), 0.0); col += lin(sunColor) * sunVis * (pow(s, 6.0) * 0.5 + pow(s, 60.0) * 2.0);',
+      ' col = mix(col, lin(ground), smoothstep(0.02, -0.12, h));',
+      ' gl_FragColor = linearToOutputTexel(vec4(col, 1.0)); }'
+    ].join('\n'), side: THREE.BackSide, depthWrite: false, depthTest: false
+  });
+  envScene.add(new THREE.Mesh(new THREE.SphereGeometry(40, 24, 12), envMat));
+  var pmrem = null, envRT = null, envDirty = true, envLastHour = -99, envT = 0;
+  G.envMaterial = envMat;
+  G.markEnvDirty = function () { envDirty = true; };
+  function updateEnvMap(force) {
+    if (G.isLow()) { if (HG.scene.environment) { HG.scene.environment = null; HG.viewScene.environment = null; } return; }
+    if (!force && !envDirty && Math.abs(HG.env.hour - envLastHour) < 0.25) return;
+    try {
+      if (!pmrem) pmrem = new THREE.PMREMGenerator(renderer);
+      var rt = pmrem.fromScene(envScene, 0, 0.1, 100);
+      if (envRT) envRT.dispose();
+      envRT = rt;
+      HG.scene.environment = rt.texture; HG.viewScene.environment = rt.texture;
+      envDirty = false; envLastHour = HG.env.hour;
+    } catch (e) { console.error('[HG] env map', e); HG.scene.environment = null; }
+  }
+  G.updateEnvMap = updateEnvMap;
 
   HG.wind = { dir: 0.6, speed: 2.5, vec: new THREE.Vector3(), target: 0.6, gust: 0 };
   function updateWindVec() { HG.wind.vec.set(-Math.sin(HG.wind.dir), 0, -Math.cos(HG.wind.dir)); }
@@ -554,16 +3122,18 @@
   HG.weatherTypes = {
     clear: { name: 'Clear', fogMult: 1, light: 1 }
   };
-  var C_NIGHT_TOP = new THREE.Color(0x0a1330), C_NIGHT_BOT = new THREE.Color(0x1c2b45),
-    C_DUSK_TOP = new THREE.Color(0x3c5b8c), C_DUSK_BOT = new THREE.Color(0xf0a066),
-    C_SUN_DAY = new THREE.Color(0xfff2dc), C_SUN_DUSK = new THREE.Color(0xffa45c), C_MOON = new THREE.Color(0x8fa6d8);
-  var dayTop = new THREE.Color(), dayBot = new THREE.Color();
+  // palette (sRGB) for the time of day
+  var C_NIGHT_TOP = new THREE.Color('#050b1d'), C_NIGHT_BOT = new THREE.Color('#121c33'),
+    C_DUSK_TOP = new THREE.Color('#3a5d98'), C_DUSK_BOT = new THREE.Color('#e9b089'), C_DAWN_BOT = new THREE.Color('#f0c4a2'),
+    C_SUN_DAY = new THREE.Color('#fff3e0'), C_SUN_GOLD = new THREE.Color('#ffc27a'), C_SUN_SET = new THREE.Color('#ff8a4a'), C_MOON = new THREE.Color('#9fb4e6'),
+    C_GREY = new THREE.Color('#8d969c');
+  var dayTop = new THREE.Color(), dayBot = new THREE.Color(), _sc = new THREE.Color(), _sc2 = new THREE.Color();
   HG.env = {
     hour: HG.config.startHour, daySpeed: HG.config.daySpeed, weather: 'clear', frozen: false,
     sun: sun, hemi: hemi, sky: sky, skyMat: skyMat, clouds: clouds,
-    sunDir: new THREE.Vector3(0, 1, 0),
-    skyTop: new THREE.Color(), skyBottom: new THREE.Color(), fogColor: new THREE.Color(),
-    fogNear: 60, fogFar: 260, lightScale: 1, fogScale: 1, daylight: 1,
+    sunDir: new THREE.Vector3(0, 1, 0), moonDir: new THREE.Vector3(0, -1, 0),
+    skyTop: new THREE.Color(), skyBottom: new THREE.Color(), fogColor: new THREE.Color(), sunColor: new THREE.Color(),
+    fogNear: 60, fogFar: 260, lightScale: 1, fogScale: 1, daylight: 1, dusk: 0,
     setHour: function (h) { HG.env.hour = ((h % 24) + 24) % 24; HG.env.apply(); HG.emit('hour', HG.env.hour); },
     isNight: function () { return HG.env.daylight < 0.25; },
     setWeather: function (id) {
@@ -573,56 +3143,79 @@
       HG.env.weather = id; var w = HG.weatherTypes[id];
       HG.env.lightScale = w.light == null ? 1 : w.light; HG.env.fogScale = w.fogMult == null ? 1 : w.fogMult;
       if (w.start) { try { w.start(); } catch (e) { console.error(e); } }
+      envDirty = true;
       HG.env.apply(); HG.emit('weather', id); return true;
     },
-    /** Recompute sky/fog/lights for the current hour + map. worlds.js may replace this function. */
+    /** Recompute sky/fog/lights for the current hour + map + weather. worlds.js may wrap or replace this function. */
     apply: function () {
-      var env = HG.env, map = HG.map, h = env.hour;
-      var ang = (h - 6) / 12 * PI;               // 0 at 6:00, PI/2 at noon, PI at 18:00
-      var elev = Math.sin(ang);
-      env.sunDir.set(Math.cos(ang), Math.max(-1, elev) * 0.82, 0.38).normalize();
+      var env = HG.env, map = HG.map, h = env.hour, P = G.sky.params, U2 = skyMat.uniforms;
+      var ang = (h - 6) / 12 * PI, elevS = Math.sin(ang);
+      var e = Math.asin(U.clamp(elevS * 0.9, -1, 1)), ce = Math.cos(e);
+      env.sunDir.set(Math.cos(ang) * ce, Math.sin(e), (0.3 + 0.45 * Math.sin(Math.max(0, Math.min(PI, ang)))) * ce).normalize();
+      env.moonDir.set(-env.sunDir.x, -env.sunDir.y * 0.9 + 0.1, -env.sunDir.z * 0.6 + 0.2).normalize();
       dayTop.set(map && map.skyTop || 0x4f8fd0);
       dayBot.set(map && (map.fog && map.fog.color) || map && map.skyBottom || 0xcfe0dc);
-      var day = U.smooth(-0.12, 0.35, elev);       // 0 night .. 1 full day
-      var dusk = U.clamp(1 - Math.abs(elev - 0.05) / 0.3, 0, 1) * (elev > -0.2 ? 1 : 0);
-      env.daylight = day;
-      env.skyTop.copy(C_NIGHT_TOP).lerp(dayTop, day);
-      env.skyBottom.copy(C_NIGHT_BOT).lerp(dayBot, day);
-      env.skyTop.lerp(C_DUSK_TOP, dusk * 0.5); env.skyBottom.lerp(C_DUSK_BOT, dusk * 0.55);
+      var day = U.smooth(-0.1, 0.3, elevS);
+      var dusk = elevS > -0.25 ? U.clamp(1 - Math.abs(elevS - 0.04) / 0.32, 0, 1) : 0;
+      env.daylight = day; env.dusk = dusk;
       var ls = env.lightScale;
+      // sky colours (sRGB)
+      env.skyTop.copy(C_NIGHT_TOP).lerp(dayTop, day).lerp(C_DUSK_TOP, dusk * 0.45);
+      env.skyBottom.copy(C_NIGHT_BOT).lerp(dayBot, day).lerp(h < 12 ? C_DAWN_BOT : C_DUSK_BOT, dusk * 0.6 * U.smooth(-0.2, 0.05, elevS));
+      if (P.tint && P.tintAmount) { _sc.set(P.tint); env.skyTop.lerp(_sc, P.tintAmount); env.skyBottom.lerp(_sc, P.tintAmount * 0.8); }
+      if (ls < 1) { _sc.copy(C_GREY).multiplyScalar(0.4 + 0.6 * day); env.skyBottom.lerp(_sc, (1 - ls) * 0.75); env.skyTop.lerp(_sc, (1 - ls) * 0.85); }
       env.fogColor.copy(env.skyBottom);
-      if (ls < 1) { _c2.setRGB(0.55, 0.58, 0.6); env.fogColor.lerp(_c2, (1 - ls) * 0.6); env.skyBottom.lerp(_c2, (1 - ls) * 0.6); env.skyTop.lerp(_c2, (1 - ls) * 0.7); }
-      skyMat.uniforms.top.value.copy(env.skyTop); skyMat.uniforms.bottom.value.copy(env.fogColor);
-      skyMat.uniforms.sunDir.value.copy(env.sunDir);
-      skyMat.uniforms.sunColor.value.copy(C_SUN_DAY).lerp(C_SUN_DUSK, dusk);
-      skyMat.uniforms.sunVis.value = U.clamp(elev * 6 + 0.3, 0, 1) * ls;
+      // sun / moon light
+      var sunUp = U.smooth(-0.06, 0.08, elevS);
+      env.sunColor.copy(C_SUN_DAY).lerp(C_SUN_GOLD, U.smooth(0.45, 0.12, elevS)).lerp(C_SUN_SET, U.smooth(0.16, -0.02, elevS));
+      U2.top.value.copy(env.skyTop); U2.bottom.value.copy(env.skyBottom);
+      U2.sunDir.value.copy(env.sunDir); U2.sunColor.value.copy(env.sunColor).multiplyScalar(0.9 + 0.3 * dusk);
+      U2.sunVis.value = sunUp * (0.25 + 0.75 * ls);
+      U2.moonDir.value.copy(env.moonDir); U2.moonVis.value = (1 - day) * ls;
+      U2.starVis.value = U.smooth(0.3, 0.0, day) * P.starBrightness * U.clamp(ls * 1.3 - 0.3, 0, 1);
+      var cover = U.clamp(P.cloudCover + (1 - ls) * 0.6, 0, 1);
+      U2.cloudCover.value = cover; U2.cloudScale.value = P.cloudScale; U2.cloudSharp.value = P.cloudSharp; U2.haze.value = P.haze; U2.glow.value = P.glow;
+      U2.cloudColor.value.setRGB(1, 1, 1).lerp(env.sunColor, 0.25 + dusk * 0.45).multiplyScalar(0.18 + 0.82 * day).lerp(C_GREY, (1 - ls) * 0.5);
+      U2.cloudShade.value.copy(env.skyBottom).lerp(env.skyTop, 0.35).multiplyScalar(0.72 + 0.1 * dusk);
+      U2.groundColor.value.copy(env.skyBottom).multiplyScalar(0.55);
       HG.scene.fog.color.copy(env.fogColor);
-      var f = map && map.fog || {};
-      env.fogNear = (f.near || 60) * env.fogScale; env.fogFar = (f.far || 260) * env.fogScale;
-      var nightFog = 0.75 + 0.25 * day;
+      var f = map && map.fog || {}, ultra = HG.quality && HG.quality.level === 'ultra' ? 1.2 : 1;
+      env.fogNear = (f.near || 60) * env.fogScale; env.fogFar = (f.far || 260) * env.fogScale * ultra;
+      var nightFog = 0.72 + 0.28 * day;
       HG.scene.fog.near = env.fogNear * nightFog; HG.scene.fog.far = env.fogFar * nightFog;
-      // sun or moon
-      if (elev > -0.05) {
-        sun.color.copy(C_SUN_DAY).lerp(C_SUN_DUSK, dusk);
-        sun.intensity = (0.25 + 0.85 * U.smooth(-0.05, 0.4, elev)) * ls;
+      var low = G.isLow();
+      if (elevS > -0.06) {
+        sun.color.copy(env.sunColor).convertSRGBToLinear();
+        sun.intensity = (0.15 + 1.85 * U.smooth(-0.04, 0.42, elevS)) * (0.3 + 0.7 * ls * ls) * (low ? 1.0 : 1);
+        sun.position.copy(env.sunDir);
       } else {
-        env.sunDir.set(-env.sunDir.x, -env.sunDir.y, env.sunDir.z); // moon opposite
-        sun.color.copy(C_MOON); sun.intensity = 0.32 * ls;
+        sun.color.copy(C_MOON).convertSRGBToLinear(); sun.intensity = 0.42 * ls;
+        env.sunDir.copy(env.moonDir);
       }
-      hemi.color.copy(env.skyTop).lerp(_c1.setRGB(1, 1, 1), 0.45);
-      hemi.groundColor.setRGB(0.32, 0.36, 0.22).lerp(_c1.setRGB(0.1, 0.12, 0.18), 1 - day);
-      hemi.intensity = (0.42 + 0.33 * day) * (0.6 + 0.4 * ls);
-      clouds.userData.mat.color.copy(env.skyBottom).lerp(_c1.setRGB(1, 1, 1), 0.55 * day + 0.1);
-      if (HG.mountains) HG.mountains.material.color.copy(HG.mountains.userData.base).lerp(env.fogColor, 0.62);
-      if (HG.water) { HG.water.material.color.copy(HG.water.userData.base).lerp(env.skyTop, 0.35).multiplyScalar(0.55 + 0.45 * day); }
-      vmHemi.color.copy(hemi.color); vmHemi.groundColor.copy(hemi.groundColor); vmHemi.intensity = hemi.intensity + 0.2;
-      vmSun.color.copy(sun.color); vmSun.intensity = Math.max(0.35, sun.intensity * 0.8);
+      // ambient: hemisphere (all qualities) + sky IBL (High/Ultra)
+      _sc.copy(env.skyTop).lerp(_sc2.setRGB(1, 1, 1), 0.3).convertSRGBToLinear();
+      hemi.color.copy(_sc);
+      hemi.groundColor.setRGB(0.36, 0.33, 0.22).lerp(_sc2.setRGB(0.05, 0.06, 0.1), 1 - day).convertSRGBToLinear();
+      hemi.intensity = (low ? (0.5 + 0.45 * day) : (0.2 + 0.15 * day)) * (0.65 + 0.35 * ls) + (1 - day) * 0.25;
+      renderer.toneMappingExposure = (G.exposure || 1.0) * (1 + (1 - day) * 0.35);
+      // env map (sky IBL) source
+      envMat.uniforms.top.value.copy(env.skyTop); envMat.uniforms.bottom.value.copy(env.skyBottom);
+      envMat.uniforms.ground.value.setRGB(0.25, 0.24, 0.17).lerp(_sc2.setRGB(0.04, 0.05, 0.08), 1 - day).multiplyScalar(0.5 + 0.5 * ls);
+      envMat.uniforms.sunDir.value.copy(env.sunDir); envMat.uniforms.sunColor.value.copy(env.sunColor); envMat.uniforms.sunVis.value = sunUp * ls;
+      if (HG.mountains && HG.mountains.material.uniforms) { var mu = HG.mountains.material.uniforms; mu.haze.value.copy(env.fogColor); mu.sunDir.value.copy(env.sunDir); mu.sunColor.value.copy(env.sunColor).multiplyScalar(sunUp * ls * 0.9 + 0.1); mu.ambient.value.copy(env.skyTop).lerp(env.skyBottom, 0.5).multiplyScalar(0.25 + 0.55 * day); }
+      if (HG.water && HG.water.material.uniforms && HG.water.material.uniforms.skyTop) {
+        var wu = HG.water.material.uniforms; wu.skyTop.value.copy(env.skyTop); wu.skyHorizon.value.copy(env.skyBottom);
+        wu.sunDir.value.copy(env.sunDir); wu.sunColor.value.copy(env.sunColor); wu.sunVis.value = sunUp * ls; wu.daylight.value = 0.12 + 0.88 * day;
+      }
+      if (G.nightGlow) for (var gi = 0; gi < G.nightGlow.length; gi++) G.nightGlow[gi].emissiveIntensity = U.smooth(0.55, 0.05, day) * 1.6;
+      vmHemi.color.copy(hemi.color); vmHemi.groundColor.copy(hemi.groundColor); vmHemi.intensity = hemi.intensity * (low ? 1.05 : 1.2) + 0.08;
+      vmSun.color.copy(sun.color); vmSun.intensity = Math.max(0.35, sun.intensity * 0.85);
+      if (Math.abs(env.hour - envLastHour) > 0.25) envDirty = true;
     },
     /** Called every frame by core (game dt). worlds.js may wrap/replace. */
     update: function (dt) {
       var env = HG.env;
       if (!env.frozen) { env.hour += dt * env.daySpeed; if (env.hour >= 24) env.hour -= 24; }
-      // wind wanders slowly
       var w = HG.wind;
       if (Math.random() < dt * 0.05) w.target = w.dir + (Math.random() - 0.5) * 1.6;
       w.dir += U.angleDiff(w.dir, w.target) * Math.min(1, dt * 0.15);
@@ -630,21 +3223,33 @@
       w.speed = U.clamp(2 + Math.sin(HG.time * 0.05) * 1.2 + w.gust, 0.3, 9);
       updateWindVec();
       envTick += dt; if (envTick > 0.5) { envTick = 0; env.apply(); }
-      for (var i = 0; i < clouds.children.length; i++) {
-        var c = clouds.children[i]; c.position.addScaledVector(w.vec, dt * w.speed * 0.8);
-        if (c.position.x * c.position.x + c.position.z * c.position.z > 520 * 520) { c.position.x *= -0.9; c.position.z *= -0.9; }
-      }
       var w2 = HG.weatherTypes[env.weather]; if (w2 && w2.update) w2.update(dt);
     }
   };
   var envTick = 0;
-  /** Keep sky, clouds and the shadow camera centred on the camera. Called every frame. */
-  function followEnv() {
+  var _lsR = new THREE.Vector3(), _lsU = new THREE.Vector3(), _lsF = new THREE.Vector3(), _lsUp = new THREE.Vector3(0, 1, 0);
+  /** Keep sky centred on the camera, the shadow frustum on the player (texel-snapped), animate sky/wind uniforms. Called every frame. */
+  function followEnv(rdt) {
     sky.position.copy(HG.camera.position);
-    clouds.position.set(HG.camera.position.x, 0, HG.camera.position.z);
-    var p = HG.player ? HG.player.pos : HG.camera.position;
-    sun.target.position.set(Math.round(p.x / 4) * 4, p.y, Math.round(p.z / 4) * 4);
-    sun.position.copy(sun.target.position).addScaledVector(HG.env.sunDir, 140);
+    skyMat.uniforms.time.value += rdt * G.sky.params.cloudSpeed * (0.4 + HG.wind.speed * 0.25);
+    var wu = windUniforms; wu.uTime.value += rdt; wu.uWind.value.set(HG.wind.vec.x, HG.wind.vec.z, 0.35 + HG.wind.speed * 0.22);
+    var pp = HG.state === 'hunt' ? player.pos : HG.camera.position;
+    wu.uPlayer.value.copy(HG.state === 'hunt' ? player.pos : HG.camera.position);
+    // shadow camera: centre ahead of the player, snapped to shadow-map texels to avoid shimmering
+    _lsF.copy(HG.env.sunDir).negate();
+    _lsR.crossVectors(_lsUp, _lsF); if (_lsR.lengthSq() < 1e-6) _lsR.set(1, 0, 0); _lsR.normalize();
+    _lsU.crossVectors(_lsF, _lsR).normalize();
+    var fx = -Math.sin(player.yaw) * (HG.state === 'hunt' ? G.shadowExtent * 0.35 : 0), fz = -Math.cos(player.yaw) * (HG.state === 'hunt' ? G.shadowExtent * 0.35 : 0);
+    _v6.set(pp.x + fx, pp.y, pp.z + fz);
+    var texel = (G.shadowExtent * 2) / sun.shadow.mapSize.x;
+    var a = Math.round(_v6.dot(_lsR) / texel) * texel, b = Math.round(_v6.dot(_lsU) / texel) * texel, c = _v6.dot(_lsF);
+    sun.target.position.set(0, 0, 0).addScaledVector(_lsR, a).addScaledVector(_lsU, b).addScaledVector(_lsF, c);
+    sun.position.copy(sun.target.position).addScaledVector(HG.env.sunDir, 160);
+    sun.target.updateMatrixWorld();
+    // view-model sun follows the world sun direction (camera space)
+    _q1.copy(HG.camera.quaternion).invert();
+    vmSun.position.copy(HG.env.sunDir).applyQuaternion(_q1);
+    envT -= rdt; if (envT <= 0) { envT = 1.0; updateEnvMap(false); }
   }
 
   /* ------------------------------------------------------------------
@@ -1321,7 +3926,7 @@
     };
   }
   function buildTerrain(map) {
-    var size = map.size || 400, seg = map.segments || Math.min(128, Math.round(size / 3.4));
+    var size = map.size || 400, seg = map.segments || Math.min(160, Math.round(size / 2.7));
     var row = seg + 1, cell = size / seg, half = size / 2, grid = new Float32Array(row * row);
     for (var iz = 0; iz <= seg; iz++) for (var ix = 0; ix <= seg; ix++) {
       grid[iz * row + ix] = map.height(ix * cell - half, iz * cell - half);
@@ -1329,60 +3934,117 @@
     terrain.size = size; terrain.seg = seg; terrain.cell = cell; terrain.grid = grid;
     terrain.waterLevel = map.water ? map.water.level : -1e9;
     terrain.ready = true;
-    var tris = seg * seg * 2, pos = new Float32Array(tris * 9), col = new Float32Array(tris * 9), p = 0;
-    var colorFn = map.groundColor || groundColorFn(map), c = new THREE.Color();
-    var jit = U.rng(1234);
-    function tri(ax, az, ah, bx, bz, bh, cx, cz, ch) {
-      pos[p] = ax; pos[p + 1] = ah; pos[p + 2] = az; pos[p + 3] = bx; pos[p + 4] = bh; pos[p + 5] = bz; pos[p + 6] = cx; pos[p + 7] = ch; pos[p + 8] = cz;
-      // face normal y for colouring
-      var ux = bx - ax, uy = bh - ah, uz = bz - az, vx = cx - ax, vy = ch - ah, vz = cz - az;
-      var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-      colorFn((ax + bx + cx) / 3, (az + bz + cz) / 3, (ah + bh + ch) / 3, ny / nl, c);
-      var j = 1 + (jit() - 0.5) * 0.07;
-      for (var k = 0; k < 3; k++) { col[p + k * 3] = c.r * j; col[p + k * 3 + 1] = c.g * j; col[p + k * 3 + 2] = c.b * j; }
-      p += 9;
+    var vc = row * row, pos = new Float32Array(vc * 3), nor = new Float32Array(vc * 3), col = new Float32Array(vc * 3), tw = new Float32Array(vc * 4);
+    var mat = map.terrainMaterial || G.terrainMaterial(G.paletteFromMap(map)), pal = mat.userData.palette || G.normPalette('meadow');
+    var tint0 = G.color(pal.tint[0]), tint1 = G.color(pal.tint[1]), tr = [tint1.r / Math.max(0.01, tint0.r), tint1.g / Math.max(0.01, tint0.g), tint1.b / Math.max(0.01, tint0.b)];
+    var colorFn = pal.mode === 'tint' ? (map.groundColor || groundColorFn(map)) : null, c = new THREE.Color(), w4 = [0, 0, 0, 0], wl = terrain.waterLevel;
+    var grassW = new Float32Array(vc), tintArr = new Float32Array(vc * 3);
+    for (iz = 0; iz <= seg; iz++) for (ix = 0; ix <= seg; ix++) {
+      var i = iz * row + ix, x = ix * cell - half, z = iz * cell - half, h = grid[i];
+      var hl = grid[iz * row + Math.max(0, ix - 1)], hr = grid[iz * row + Math.min(seg, ix + 1)], hd = grid[Math.max(0, iz - 1) * row + ix], hu = grid[Math.min(seg, iz + 1) * row + ix];
+      var nx = (hl - hr) / (2 * cell), nz = (hd - hu) / (2 * cell), nl = Math.sqrt(nx * nx + 1 + nz * nz);
+      pos[i * 3] = x; pos[i * 3 + 1] = h; pos[i * 3 + 2] = z;
+      nor[i * 3] = nx / nl; nor[i * 3 + 1] = 1 / nl; nor[i * 3 + 2] = nz / nl;
+      var slope = Math.sqrt(nx * nx + nz * nz);
+      G.terrainWeights(pal, x, z, h, slope, wl, w4);
+      tw[i * 4] = w4[0]; tw[i * 4 + 1] = w4[1]; tw[i * 4 + 2] = w4[2]; tw[i * 4 + 3] = w4[3];
+      grassW[i] = pal.grassKind === 'grass' ? w4[0] : 0;
+      if (colorFn) { colorFn(x, z, h, 1 / nl, c); c.convertSRGBToLinear(); c.multiplyScalar(1.25); }
+      else {
+        var n = G.noise.fbm2(x * 0.0045 + 0.5, z * 0.0045 + 0.5, 4, 4, 21), k = U.smooth(0.3, 0.75, n);
+        c.setRGB(1 + (tr[0] - 1) * k, 1 + (tr[1] - 1) * k, 1 + (tr[2] - 1) * k).multiplyScalar(0.94 + 0.12 * G.noise.fbm2(x * 0.02, z * 0.02, 4, 3, 22));
+      }
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      tintArr[i * 3] = c.r; tintArr[i * 3 + 1] = c.g; tintArr[i * 3 + 2] = c.b;
     }
+    var idx = new (vc > 65535 ? Uint32Array : Uint16Array)(seg * seg * 6), p = 0;
     for (iz = 0; iz < seg; iz++) for (ix = 0; ix < seg; ix++) {
-      var x0 = ix * cell - half, x1 = x0 + cell, z0 = iz * cell - half, z1 = z0 + cell, i0 = iz * row + ix;
-      var h00 = grid[i0], h10 = grid[i0 + 1], h01 = grid[i0 + row], h11 = grid[i0 + row + 1];
-      tri(x0, z0, h00, x0, z1, h01, x1, z0, h10);
-      tri(x0, z1, h01, x1, z1, h11, x1, z0, h10);
+      var i00 = iz * row + ix, i10 = i00 + 1, i01 = i00 + row, i11 = i01 + 1;
+      idx[p++] = i00; idx[p++] = i01; idx[p++] = i10;   // same diagonal split as terrain.heightAt
+      idx[p++] = i01; idx[p++] = i11; idx[p++] = i10;
     }
     var g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    g.computeVertexNormals();
+    g.setAttribute('tw', new THREE.BufferAttribute(tw, 4));
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
     g.computeBoundingSphere();
-    var mat = new THREE.MeshLambertMaterial({ vertexColors: true });
     var mesh = new THREE.Mesh(g, mat);
     mesh.receiveShadow = true; mesh.name = 'terrain';
-    terrain.mesh = mesh;
+    terrain.mesh = mesh; terrain.grassW = grassW; terrain.tint = tintArr; terrain.palette = pal;
+    G.terrainMat = mat;
     return mesh;
   }
   function buildWater(map) {
     if (!map.water) return null;
-    var w = map.water, s = (map.size || 400) * 1.6;
-    var g = new THREE.PlaneGeometry(s, s, 1, 1); g.rotateX(-PI / 2);
-    var m = new THREE.MeshPhongMaterial({ color: new THREE.Color(w.color || '#3d7f95'), transparent: true, opacity: w.opacity == null ? 0.82 : w.opacity, shininess: 90, specular: new THREE.Color(0x99aabb), depthWrite: false });
-    var mesh = new THREE.Mesh(g, m); mesh.position.y = w.level; mesh.name = 'water'; mesh.renderOrder = 2;
+    var w = map.water, wl = w.level, size = terrain.size, seg = terrain.seg, cell = terrain.cell, row = seg + 1, half = size / 2, grid = terrain.grid;
+    // bounding box of the cells that are (nearly) under water
+    var x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9;
+    for (var iz = 0; iz <= seg; iz++) for (var ix = 0; ix <= seg; ix++) if (grid[iz * row + ix] < wl + 0.3) { x0 = Math.min(x0, ix); x1 = Math.max(x1, ix); z0 = Math.min(z0, iz); z1 = Math.max(z1, iz); }
+    if (x0 > x1) return null;
+    x0 = Math.max(0, x0 - 2); z0 = Math.max(0, z0 - 2); x1 = Math.min(seg, x1 + 2); z1 = Math.min(seg, z1 + 2);
+    var step = 1, nx = Math.ceil((x1 - x0) / step), nz = Math.ceil((z1 - z0) / step), pos = [], dep = [], ind = [], vmap = {};
+    function vert(ix, iz) {
+      var key = ix + ',' + iz; if (vmap[key] != null) return vmap[key];
+      var x = ix * cell - half, z = iz * cell - half; vmap[key] = pos.length / 3;
+      pos.push(x, 0, z); dep.push(wl - grid[Math.min(seg, iz) * row + Math.min(seg, ix)]); return vmap[key];
+    }
+    for (var j = 0; j < nz; j++) for (var i = 0; i < nx; i++) {
+      var ax = x0 + i * step, az = z0 + j * step, bx = Math.min(x1, ax + step), bz = Math.min(z1, az + step);
+      var d = Math.max(wl - grid[az * row + ax], wl - grid[az * row + bx], wl - grid[bz * row + ax], wl - grid[bz * row + bx]);
+      if (d < -0.4) continue;
+      var a = vert(ax, az), b = vert(bx, az), c = vert(ax, bz), e = vert(bx, bz);
+      ind.push(a, c, b, b, c, e);
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('depth', new THREE.Float32BufferAttribute(dep, 1));
+    g.setIndex(ind); g.computeBoundingSphere();
+    var m = map.waterMaterial || G.waterMaterial({ shallow: w.shallow || '#5c8f84', deep: w.deep || w.color || '#1c4a5c', opacity: w.opacity == null ? 0.86 : Math.max(0.6, w.opacity), ripple: w.ripple, foam: w.foam });
+    var mesh = new THREE.Mesh(g, m); mesh.position.y = wl; mesh.name = 'water'; mesh.renderOrder = 2;
     mesh.userData.base = new THREE.Color(w.color || '#3d7f95');
     return mesh;
   }
+  /** layered mountain ring with atmospheric haze (custom shader, not fogged) */
   function buildMountains(map) {
     if (map.horizon === false) return null;
-    var r = U.rng(99), parts = [], size = map.size || 400, base = size * 0.62;
-    var rock = new THREE.Color(map.mountainColor || '#5b7178'), snow = new THREE.Color('#eef3f5');
-    for (var i = 0; i < 44; i++) {
-      var a = i / 44 * TAU + r() * 0.1, d = base + r() * size * 0.35, rad = 45 + r() * 70, h = 40 + r() * 110;
-      var g = M.cone(rad, h, 5 + Math.floor(r() * 3), rock, { pos: [Math.cos(a) * d, h / 2 - 12, Math.sin(a) * d], rot: [0, r() * 3, 0], jitter: 0.12, rng: r });
-      // snow caps: tint top vertices
-      var pa = g.attributes.position.array, ca = g.attributes.color.array;
-      for (var v = 0; v < pa.length; v += 3) if (pa[v + 1] > h * 0.62 - 12 && h > 80) { ca[v] = snow.r; ca[v + 1] = snow.g; ca[v + 2] = snow.b; }
-      parts.push(g);
-    }
-    var mat = new THREE.MeshLambertMaterial({ vertexColors: true, fog: false });
-    var mesh = new THREE.Mesh(M.merge(parts), mat);
-    mesh.name = 'mountains'; mesh.userData.base = new THREE.Color(0xffffff);
+    var size = map.size || 400, base = new THREE.Color(map.mountainColor || '#5b7178'), forestC = new THREE.Color(map.treeColor || '#2f5a32').lerp(base, 0.35), snow = new THREE.Color('#eef3f6');
+    var pos = [], col = [], hz = [], ind = [], layers = [[0.78, 55, 0.35, 0.55], [1.02, 95, 0.55, 0.42], [1.35, 150, 0.72, 0.3]], segs = 220, rows = 7;
+    layers.forEach(function (L, li) {
+      var dist = size * L[0], Hm = L[1], vb = pos.length / 3;
+      for (var s = 0; s <= segs; s++) {
+        var a = s / segs * Math.PI * 2, u = s / segs;
+        var ridge = 0.25 + 0.75 * Math.pow(G.noise.fbm2(u, li * 0.37, 6, 5, 31 + li), 1.6) * 1.6;
+        var peak = Math.min(1.25, ridge);
+        for (var r = 0; r <= rows; r++) {
+          var t = r / rows, rr = dist + (1 - t) * Hm * 0.9 * (0.6 + 0.4 * Math.sin(a * 7 + li));
+          var jit = (G.noise.fbm2(u * 3 + t * 0.2, t + li, 12, 3, 47) - 0.5) * Hm * 0.25 * t;
+          var y = -25 + t * (Hm * peak + 25) + jit, x = Math.cos(a) * rr, z = Math.sin(a) * rr;
+          pos.push(x, y, z);
+          var hgt = y / (Hm * 1.1), c = new THREE.Color().copy(forestC).lerp(base, U.smooth(0.15, 0.55, hgt));
+          if (li < 2 || hgt > 0.6) c.lerp(snow, U.smooth(0.72, 0.9, hgt + (G.noise.fbm2(u * 4, t, 8, 3, 9) - 0.5) * 0.25) * (Hm > 80 ? 1 : 0.4));
+          c.multiplyScalar(0.92 + 0.16 * G.noise.fbm2(u * 9, t * 2, 16, 2, 5));
+          col.push(c.r, c.g, c.b); hz.push(L[2] + (1 - t) * 0.25);
+        }
+      }
+      for (s = 0; s < segs; s++) for (var q = 0; q < rows; q++) { var i0 = vb + s * (rows + 1) + q, i1 = i0 + rows + 1; ind.push(i0, i0 + 1, i1, i1, i0 + 1, i1 + 1); }
+    });
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setAttribute('haze', new THREE.Float32BufferAttribute(hz, 1));
+    g.setIndex(ind); g.computeVertexNormals();
+    // outward-facing check: normals should point toward the centre (we look at the ring from inside)
+    var mat = new THREE.ShaderMaterial({
+      uniforms: { haze: { value: new THREE.Color(0xcfe0dc) }, sunDir: { value: new THREE.Vector3(0, 1, 0) }, sunColor: { value: new THREE.Color(1, 1, 1) }, ambient: { value: new THREE.Color(0.5, 0.55, 0.6) } },
+      vertexShader: 'attribute float haze; attribute vec3 color; varying vec3 vC; varying vec3 vN; varying float vH; varying float vY; void main(){ vC = color; vN = normalize(normal); vH = haze; vY = position.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: 'uniform vec3 haze; uniform vec3 sunDir; uniform vec3 sunColor; uniform vec3 ambient; varying vec3 vC; varying vec3 vN; varying float vH; varying float vY;' +
+        'void main(){ vec3 n = normalize(vN); float l = max(dot(n, sunDir), 0.0); vec3 c = vC * (ambient + sunColor * l * 0.85); float h = clamp(vH + (1.0 - smoothstep(-10.0, 45.0, vY)) * 0.45, 0.0, 0.97); gl_FragColor = vec4(mix(c, haze, h), 1.0); }',
+      side: THREE.DoubleSide, fog: false
+    });
+    var mesh = new THREE.Mesh(g, mat);
+    mesh.name = 'mountains'; mesh.userData.base = new THREE.Color(0xffffff); mesh.frustumCulled = false; mesh.renderOrder = -10;
     return mesh;
   }
 
@@ -1443,10 +4105,10 @@
         for (var v = 0; v < nv; v++) {
           var r = factory(rng, v);
           if (r && r.isBufferGeometry) variants.push({ geometry: r, material: HG.vcMat });
-          else if (r && r.geometry) variants.push({ geometry: r.geometry, material: r.material || HG.vcMat });
+          else if (r && r.geometry) variants.push({ geometry: r.geometry, material: r.material || HG.vcMat, lod: r.lod || null, castShadow: r.castShadow });
         }
         if (!variants.length) return { count: 0, points: [], meshes: [] };
-        variants.forEach(function (vv) { if (!vv.geometry.boundingSphere) vv.geometry.computeBoundingSphere(); });
+        variants.forEach(function (vv) { if (!vv.geometry.boundingSphere) vv.geometry.computeBoundingSphere(); if (vv.lod && !vv.lod.geometry.boundingSphere) vv.lod.geometry.computeBoundingSphere(); });
         var chunkSize = opts.chunk || 100, nC = Math.max(1, Math.ceil(terrain.size / chunkSize));
         var buckets = {}, points = [], sc = opts.scale || [1, 1];
         for (var i = 0; i < count; i++) {
@@ -1459,32 +4121,38 @@
           (buckets[key] || (buckets[key] = { v: vi, cx: cx, cz: cz, pts: [] })).pts.push(p2);
           if (opts.collider) colliders.add(pt.x, pt.z, opts.collider * s, { h: (opts.colliderHeight || 6) * s, tag: opts.tag || '', cover: !!opts.cover, solid: opts.solid !== false });
         }
+        var tints = opts.tint ? opts.tint.map(function (c) { return G.color(c); }) : null;
+        var lodK = HG.quality.low ? 0.65 : HG.quality.level === 'ultra' ? 1.4 : 1;
         var meshes = [];
         for (var k in buckets) {
-          var b = buckets[k], vr = variants[b.v];
-          var g = new THREE.BufferGeometry();
-          for (var an in vr.geometry.attributes) g.setAttribute(an, vr.geometry.attributes[an]);
-          var im = new THREE.InstancedMesh(g, vr.material, b.pts.length);
+          var b = buckets[k], vr = variants[b.v], n = b.pts.length;
+          var mats = new Float32Array(n * 16), cols = tints ? new Float32Array(n * 3) : null;
           var mx = 0, mz = 0;
-          for (var j = 0; j < b.pts.length; j++) {
+          for (var j = 0; j < n; j++) {
             var q = b.pts[j];
             _obj.position.set(q.x, q.y, q.z); _obj.scale.setScalar(q.s);
             if (opts.align) { terrain.normalAt(q.x, q.z, _v4); _q1.setFromUnitVectors(_v3.set(0, 1, 0), _v4); _obj.quaternion.setFromAxisAngle(_v3, q.ry).premultiply(_q1); }
             else _obj.quaternion.setFromAxisAngle(_v3.set(0, 1, 0), q.ry);
-            _obj.updateMatrix(); im.setMatrixAt(j, _obj.matrix);
+            _obj.updateMatrix(); _obj.matrix.toArray(mats, j * 16);
+            if (cols) { var tc = tints[Math.floor(rng() * tints.length)], kk = 0.88 + rng() * 0.24; cols[j * 3] = tc.r * kk; cols[j * 3 + 1] = tc.g * kk; cols[j * 3 + 2] = tc.b * kk; }
             mx += q.x; mz += q.z;
           }
-          mx /= b.pts.length; mz /= b.pts.length;
-          var rad = 0;
-          for (j = 0; j < b.pts.length; j++) { var dd = U.dist2D(mx, mz, b.pts[j].x, b.pts[j].z) + vr.geometry.boundingSphere.radius * b.pts[j].s; if (dd > rad) rad = dd; }
-          g.boundingSphere = new THREE.Sphere(new THREE.Vector3(mx, terrain.heightAt(mx, mz), mz), rad + 10);
-          im.instanceMatrix.needsUpdate = true;
-          im.castShadow = !!opts.castShadow; im.receiveShadow = !!opts.receiveShadow;
-          im.userData.scatter = true;
+          mx /= n; mz /= n;
+          var rad = 0, gr = Math.max(vr.geometry.boundingSphere.radius, vr.lod ? vr.lod.geometry.boundingSphere.radius : 0);
+          for (j = 0; j < n; j++) { var dd = U.dist2D(mx, mz, b.pts[j].x, b.pts[j].z) + gr * b.pts[j].s; if (dd > rad) rad = dd; }
+          var sphere = new THREE.Sphere(new THREE.Vector3(mx, terrain.heightAt(mx, mz), mz), rad + 10);
+          var shadow = opts.castShadow != null ? !!opts.castShadow : !!vr.castShadow;
+          var im = scatterIM(vr.geometry, vr.material, n, mats, cols, sphere);
+          im.castShadow = shadow; im.receiveShadow = opts.receiveShadow !== false;
           HG.mapRoot.add(im); meshes.push(im);
-          scatterChunks.push({ mesh: im, cx: mx, cz: mz, r: rad, view: opts.viewDist || 0 });
+          var lo = null;
+          if (vr.lod) {
+            lo = scatterIM(vr.lod.geometry, vr.lod.material || vr.material, n, mats, cols, sphere);
+            lo.castShadow = shadow; lo.receiveShadow = opts.receiveShadow !== false; lo.count = 0; lo.visible = false;
+            HG.mapRoot.add(lo); meshes.push(lo);
+          }
+          scatterChunks.push({ mesh: im, lo: lo, cx: mx, cz: mz, r: rad, view: opts.viewDist || 0, mats: mats, cols: cols, n: n, lodDist: vr.lod ? (vr.lod.dist || 60) * lodK : 0, state: '', lx: 1e9, lz: 1e9 });
         }
-        // the template geometries are only referenced through shared attributes now
         return { count: points.length, points: points, meshes: meshes };
       }
     };
@@ -1494,10 +4162,12 @@
     var geos = new Set(), mats = new Set();
     root.traverse(function (o) {
       if (o.geometry && !(o.geometry.userData && o.geometry.userData.shared)) geos.add(o.geometry);
+      if (o.userData && o.userData.lodGeos) o.userData.lodGeos.forEach(function (g) { if (g && !(g.userData && g.userData.shared)) geos.add(g); });
       if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (!m.userData || !m.userData.shared) mats.add(m); });
+      if (o.isSkinnedMesh && o.skeleton && o.skeleton.dispose) { try { o.skeleton.dispose(); } catch (e) {} }
     });
     geos.forEach(function (g) { try { g.dispose(); } catch (e) {} });
-    mats.forEach(function (m) { try { if (m.map) m.map.dispose(); m.dispose(); } catch (e) {} });
+    mats.forEach(function (m) { try { if (m.map && !(m.map.userData && m.map.userData.shared)) m.map.dispose(); m.dispose(); } catch (e) {} });
   }
   HG.disposeObject = function (o) { if (!o) return; if (o.parent) o.parent.remove(o); disposeTree(o); };
   function unloadMap() {
@@ -1510,7 +4180,7 @@
     HG.scene.remove(HG.mapRoot);
     disposeTree(HG.mapRoot);
     HG.mapRoot = null; HG.map = null; HG.mapId = null; HG.water = null; HG.mountains = null;
-    terrain.ready = false; terrain.grid = null; terrain.mesh = null;
+    terrain.ready = false; terrain.grid = null; terrain.mesh = null; terrain.grassW = null; G.grass.mesh = null;
     colliders.clear(); scatterChunks.length = 0; clearZones.length = 0;
     ui.clearContext();
   }
@@ -1530,7 +4200,9 @@
     var ctx = makeBuildCtx(map, id);
     HG.mapCtx = ctx;
     try { if (map.build) map.build(ctx); } catch (e) { console.error('[HG] map build failed', e); }
+    try { G.initGrass(map); } catch (e) { console.error('[HG] grass', e); }
     HG.env.apply();
+    G.markEnvDirty(); if (HG.booted || HG.state !== 'boot') G.updateEnvMap(true);
     HG.emit('mapLoaded', map, ctx);
     return true;
   };
@@ -1553,11 +4225,50 @@
     HG.emit('mapUnlocked', id);
     return true;
   };
+  function scatterIM(geo, mat, n, mats, cols, sphere) {
+    var g = new THREE.BufferGeometry();
+    for (var an in geo.attributes) g.setAttribute(an, geo.attributes[an]);
+    if (geo.index) g.setIndex(geo.index);
+    g.boundingSphere = sphere;
+    var im = new THREE.InstancedMesh(g, mat, n);
+    im.instanceMatrix.array.set(mats);
+    // always attach instance colours: r128 shares one program per material, so every instanced user of a material must agree
+    im.instanceColor = new THREE.InstancedBufferAttribute(cols ? new Float32Array(cols) : new Float32Array(n * 3).fill(1), 3);
+    if (mat.alphaTest > 0 || (mat.userData && mat.userData.wind)) im.customDepthMaterial = G.depthMaterial(mat);
+    im.instanceMatrix.needsUpdate = true;
+    im.userData.scatter = true;
+    return im;
+  }
+  function fillIM(im, mats, cols) {
+    im.instanceMatrix.array.set(mats); im.count = mats.length / 16; im.instanceMatrix.needsUpdate = true;
+    if (cols && im.instanceColor) { im.instanceColor.array.set(cols); im.instanceColor.needsUpdate = true; }
+  }
+  function partitionChunk(c, px, pz) {
+    var hi = c.mesh, lo = c.lo, ha = hi.instanceMatrix.array, la = lo.instanceMatrix.array, m = c.mats, cols = c.cols;
+    var hc = cols && hi.instanceColor ? hi.instanceColor.array : null, lc = cols && lo.instanceColor ? lo.instanceColor.array : null;
+    var nh = 0, nl = 0, d2 = c.lodDist * c.lodDist, k;
+    for (var j = 0; j < c.n; j++) {
+      var o = j * 16, dx = m[o + 12] - px, dz = m[o + 14] - pz;
+      if (dx * dx + dz * dz < d2) { for (k = 0; k < 16; k++) ha[nh * 16 + k] = m[o + k]; if (hc) { hc[nh * 3] = cols[j * 3]; hc[nh * 3 + 1] = cols[j * 3 + 1]; hc[nh * 3 + 2] = cols[j * 3 + 2]; } nh++; }
+      else { for (k = 0; k < 16; k++) la[nl * 16 + k] = m[o + k]; if (lc) { lc[nl * 3] = cols[j * 3]; lc[nl * 3 + 1] = cols[j * 3 + 1]; lc[nl * 3 + 2] = cols[j * 3 + 2]; } nl++; }
+    }
+    hi.count = nh; lo.count = nl; hi.instanceMatrix.needsUpdate = true; lo.instanceMatrix.needsUpdate = true;
+    if (hc) hi.instanceColor.needsUpdate = true; if (lc) lo.instanceColor.needsUpdate = true;
+  }
+  /** distance culling + per-instance LOD partition of scatter chunks (every 0.25 s) */
   function updateChunkCulling() {
     var cx = HG.camera.position.x, cz = HG.camera.position.z, far = HG.scene.fog.far + 8;
     for (var i = 0; i < scatterChunks.length; i++) {
-      var c = scatterChunks[i], d = U.dist2D(cx, cz, c.cx, c.cz) - c.r;
-      c.mesh.visible = d < (c.view ? Math.min(far, c.view) : far);
+      var c = scatterChunks[i], dc = U.dist2D(cx, cz, c.cx, c.cz), d = dc - c.r;
+      var vis = d < (c.view ? Math.min(far, c.view) : far);
+      if (!c.lo) { c.mesh.visible = vis; continue; }
+      if (!vis) { c.mesh.visible = c.lo.visible = false; continue; }
+      var st = dc + c.r < c.lodDist ? 'near' : (d > c.lodDist ? 'far' : 'mixed');
+      if (st === 'near') { if (c.state !== 'near') { fillIM(c.mesh, c.mats, c.cols); c.lo.count = 0; } }
+      else if (st === 'far') { if (c.state !== 'far') { fillIM(c.lo, c.mats, c.cols); c.mesh.count = 0; } }
+      else if (c.state !== 'mixed' || (cx - c.lx) * (cx - c.lx) + (cz - c.lz) * (cz - c.lz) > 9) { partitionChunk(c, cx, cz); c.lx = cx; c.lz = cz; }
+      c.state = st;
+      c.mesh.visible = c.mesh.count > 0; c.lo.visible = c.lo.count > 0;
     }
   }
 
@@ -2040,6 +4751,7 @@
     a.root.rotation.y = a.yaw;
   }
   function animateAnimal(a, dt) {
+    if (a.parts && a.parts.animate) { try { a.parts.animate(a, dt); } catch (e) { console.error('[HG] animate ' + a.type, e); a.parts.animate = null; } return; }
     var def = a.def, sp = a.speed, sc = a.scale;
     a.phase += dt * sp * (def.stride || 2.6) / Math.max(0.3, sc);
     var gait = def.gait || (def.fly ? 'fly' : 'walk');
@@ -2076,6 +4788,18 @@
   }
   function updateDead(a, dt) {
     a.deadT += dt;
+    if (a.parts && a.parts.die) {
+      try { a.parts.die(a, dt); } catch (e) { console.error('[HG] die ' + a.type, e); a.parts.die = null; }
+      if (a.fadeT < 0 && a.deadT > 40) startFade(a);
+      if (a.fadeT >= 0) {
+        a.fadeT += dt;
+        var of = 1 - U.clamp(a.fadeT / 1.4, 0, 1);
+        if (a.fadeMats) a.fadeMats.forEach(function (m) { m.opacity = of; });
+        a.root.position.y -= a.fadeT * 0.15;
+        if (of <= 0) HG.removeAnimal(a);
+      }
+      return;
+    }
     var k = U.smooth(0, 0.7, a.deadT);
     a.root.rotation.z = a.tipDir * k * PI * 0.5;
     a.alt = U.damp(a.alt, 0, 3, dt);
@@ -2185,7 +4909,7 @@
 
   /* ---------- tracking dots (subtle dark-red, instanced ring buffer) ---------- */
   var dotGeo = new THREE.CircleGeometry(0.055, 6); dotGeo.rotateX(-PI / 2);
-  var dotMat = new THREE.MeshBasicMaterial({ color: 0x5a1010, transparent: true, opacity: 0.85, depthWrite: false });
+  var dotMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0x5a1010).convertSRGBToLinear(), transparent: true, opacity: 0.85, depthWrite: false });
   var dotMesh = new THREE.InstancedMesh(dotGeo, dotMat, HG.config.trackDotMax);
   dotMesh.count = 0; dotMesh.frustumCulled = false; dotMesh.renderOrder = 1; dotMesh.name = 'trackDots';
   HG.scene.add(dotMesh);
@@ -2220,7 +4944,7 @@
   HG.particles = {
     emit: function (pos, count, o) {
       o = o || {};
-      _c2.set(o.color || 0x9a7b55);
+      _c2.set(o.color || 0x9a7b55).convertSRGBToLinear();
       for (var i = 0; i < count; i++) {
         var p = parts[pNext], k = pNext * 3;
         var sp = (o.speed == null ? 2 : o.speed) * (0.4 + Math.random() * 0.8), spr = o.spread == null ? 1 : o.spread;
@@ -2316,7 +5040,7 @@
     }
     v.push(0, 0, 0, 0.03, 0, -0.25, -0.03, 0, -0.25);
     g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
-    var m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    var m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(0xffd27a).convertSRGBToLinear(), transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
     m.visible = false; m.renderOrder = 10; return m;
   })();
   HG.viewModel.add(flashMesh);
@@ -2619,6 +5343,7 @@
   function killAnimal(a, zone, info) {
     var def = a.def, rar = HG.RARITY[def.rarity] || HG.RARITY.common;
     cardsPending++;
+    a.deathSpeed = a.speed;
     a.dead = true; a.alive = false; a.state = 'dead'; a.deadT = 0; a.speed = 0; a.moveSpeed = 0;
     a.tipDir = Math.random() < 0.5 ? 1 : -1;
     var dist = Math.round((info.distance || a.distToPlayer) * 10) / 10;
@@ -2765,6 +5490,8 @@
     if (W.model) {
       W.model.position.copy(vmPos);
       W.model.rotation.set(rotX, (1 - W.aimT) * 0.04 + W.swayX * 0.5 * swayK, rotZ + W.swayX * 0.6 * swayK);
+      // per-weapon moving parts (bolt / lever / slide / bow string / hands): group.userData.animate(W, dt, realDt)
+      if (W.model.userData.animate) { try { W.model.userData.animate(W, dt, rdt); } catch (e) { console.error('[HG] view model animate', e); W.model.userData.animate = null; } }
     }
     // muzzle flash
     if (W.flashT > 0) {
@@ -3405,7 +6132,7 @@
     { key: 'sens', label: 'Look sensitivity', type: 'range', min: 0.3, max: 2.5, step: 0.05 },
     { key: 'invertY', label: 'Invert look (Y)', type: 'toggle' },
     { key: 'fov', label: 'Field of view', type: 'range', min: 60, max: 90, step: 1 },
-    { key: 'graphics', label: 'Graphics', type: 'choice', options: [['low', 'Low'], ['high', 'High']] },
+    { key: 'graphics', label: 'Graphics', type: 'choice', options: U.isTouchDevice() && HG.settings.graphics !== 'ultra' ? [['low', 'Low'], ['high', 'High']] : [['low', 'Low'], ['high', 'High'], ['ultra', 'Ultra']] },
     { key: 'aimAssist', label: 'Aim assist (touch)', type: 'toggle' },
     { key: 'sound', label: 'Sound effects', type: 'toggle' },
     { key: 'music', label: 'Music', type: 'toggle' },
@@ -3655,13 +6382,17 @@
       }
       updateThreat(rdt);
       if (HG.state === 'hunt') updateHUD(rdt);
-      followEnv();
+      followEnv(rdt);
+      if (HG.state === 'hunt') G.updateGrass(player.pos.x, player.pos.z); else G.updateGrass(HG.camera.position.x, HG.camera.position.z);
+      lodT -= rdt; if (lodT <= 0) { lodT = 0.2; G.updateLODs(HG.camera.position); }
       cullT -= rdt; if (cullT <= 0) { cullT = 0.25; updateChunkCulling(); }
     } catch (e) {
       console.error('[HG] frame error', e);
     }
   }
+  var lodT = 0;
   function render(rdt) {
+    renderer.info.reset();
     renderer.clear();
     renderer.render(HG.scene, HG.camera);
     if (HG.state === 'hunt' && HG.viewModel.visible && HG.viewModel.children.length > 1) {
@@ -3761,6 +6492,8 @@
       return n;
     },
     /** compact state snapshot for tests */
+    /** renderer stats for the last frame (draw calls incl. shadow + view-model passes) */
+    renderInfo: function () { var i = renderer.info; return { calls: i.render.calls, triangles: i.render.triangles, points: i.render.points, geometries: i.memory.geometries, textures: i.memory.textures, programs: i.programs ? i.programs.length : 0, pixelRatio: renderer.getPixelRatio(), level: HG.quality.level }; },
     snapshot: function () {
       return { state: HG.state, paused: HG.paused, screen: ui.current, map: HG.mapId, animals: HG.animals.length, alive: HG.animals.filter(function (a) { return !a.dead; }).length,
         player: { x: +player.pos.x.toFixed(2), z: +player.pos.z.toFixed(2), yaw: +player.yaw.toFixed(3), pitch: +player.pitch.toFixed(3), health: player.health },
@@ -3868,8 +6601,9 @@
   HG.sounds.levelup = function (ctx, dest, o, t) { [392, 523, 659, 784, 1047].forEach(function (f, i) { tone(ctx, dest, t + i * 0.08, 'square', f, null, 0.3, 0.06); tone(ctx, dest, t + i * 0.08, 'triangle', f, null, 0.4, 0.12); }); };
 
   /* ---------- outfit colours for first-person arms (gear/outfits may override) ---------- */
-  HG.getOutfitColors = function () { return { sleeve: '#55613a', cuff: '#ff8a1f', glove: '#3b2a1e' }; };
-  /** Build first-person arms for a view model. grip: {right:[x,y,z], left:[x,y,z]} in weapon space. Returns prepared geometries. */
+  /** {sleeve, cuff, glove} CSS colours (+ optional pattern:'woodland'|'leafy'|'digital'|'blaze'|..., palette:[...]) */
+  HG.getOutfitColors = function () { return { sleeve: '#55613a', cuff: '#ff8a1f', glove: '#4a3424' }; };
+  /** LEGACY low-poly arms (prepared geometries for HG.model.mesh). New view models should use HG.gfx.fpArms. */
   HG.model.arms = function (grip) {
     var c = HG.getOutfitColors(), g = [];
     var R = grip && grip.right || [0.035, -0.12, 0.1], L = grip && grip.left || [0, -0.1, -0.28];
@@ -3882,45 +6616,125 @@
     return g;
   };
 
-  /* ---------- weapon: hunting rifle ---------- */
+  /* ---------- weapon: hunting rifle (bolt action, walnut + blued steel, 4x scope) ---------- */
   HG.ammoTypes.rifle_ammo = { name: '.308 Rifle Rounds', price: 40, pack: 10, color: '#d9a441', desc: 'Soft-point rounds for medium and large game.' };
+  function sec(z, y, w, hu, hd, sq) { return { p: [0, y, z], w: w, hUp: hu, hDown: hd, sq: sq || 2.4 }; }
+  function lathe(prof, y, radial, linear) { return G.loft(prof.map(function (q) { return { p: [0, y, q[0]], r: q[1] }; }), { radial: radial || 24, steps: linear ? 1 : 2, linear: !!linear, frame: 'up', capStart: false, capEnd: false, density: 40 }); }
+  var rifleCache = {};
+  function buildRifleParts() {
+    var lowQ = G.isLow(), key = lowQ ? 'L' : 'H';
+    if (rifleCache[key]) return rifleCache[key];
+    var BORE = -0.05, out = {};
+    // ---- wood: butt stock + wrist + forend (one loft), pistol grip (checkered) ----
+    var stock = G.organicBody([
+      sec(0.432, -0.101, 0.04, 0.036, 0.07, 3), sec(0.425, -0.1, 0.043, 0.038, 0.072, 3.2), sec(0.37, -0.096, 0.044, 0.037, 0.066, 3), sec(0.27, -0.089, 0.043, 0.033, 0.05, 2.8),
+      sec(0.175, -0.079, 0.036, 0.025, 0.034, 2.5), sec(0.1, -0.071, 0.034, 0.022, 0.03, 2.5), sec(0.04, -0.065, 0.042, 0.022, 0.031, 2.8),
+      sec(-0.06, -0.066, 0.045, 0.021, 0.034, 3), sec(-0.17, -0.064, 0.044, 0.019, 0.028, 2.8), sec(-0.29, -0.062, 0.041, 0.018, 0.024, 2.6), sec(-0.37, -0.062, 0.035, 0.016, 0.02, 2.4), sec(-0.385, -0.062, 0.022, 0.01, 0.012, 2.2)
+    ], { radial: lowQ ? 16 : 30, steps: lowQ ? 2 : 4, smooth: 1, density: 1, uRepeat: 1, capBulge: 0.1 });
+    // uv.v along the stock (1 repeat per metre) -> remap to texture length
+    var grip = G.taperedLimb([{ p: [0, -0.078, 0.082], rx: 0.0165, rz: 0.022 }, { p: [0, -0.103, 0.101], rx: 0.016, rz: 0.023 }, { p: [0, -0.13, 0.12], rx: 0.0158, rz: 0.0235 }, { p: [0, -0.155, 0.137], rx: 0.0162, rz: 0.024 }, { p: [0, -0.163, 0.142], rx: 0.012, rz: 0.018 }],
+      { radial: lowQ ? 12 : 20, steps: lowQ ? 2 : 3, n: [0, 0.6, -1], density: 6, capStart: false, capBulge: 0.3 });
+    var wood = TX.woodGrain({ base: '#7a4524', dark: '#3a1d0d', light: '#a8653a', figure: 0.6, rings: 30, seed: 5 });
+    var gripTex = TX.woodGrain({ base: '#7a4524', dark: '#3a1d0d', light: '#a8653a', figure: 0.6, rings: 30, seed: 6, checker: [{ x: 0.08, y: 0.12, w: 0.34, h: 0.72 }, { x: 0.58, y: 0.12, w: 0.34, h: 0.72 }] });
+    G.vertexAO(stock, { cells: 12, strength: 0.4, min: 0.7 });
+    var recoilPad = G.organicBody([sec(0.445, -0.101, 0.04, 0.036, 0.07, 3.2), sec(0.452, -0.1, 0.039, 0.035, 0.069, 3.2), sec(0.46, -0.1, 0.034, 0.03, 0.063, 3)], { radial: 24, steps: 2, density: 20, capBulge: 0.05 });
+    G.tint(recoilPad, '#1d1c1a');
+    out.wood = { geo: stock, mat: G.mat({ map: wood, normalMap: lowQ ? null : TX.normalOf(wood, 1.2), normalScale: 0.4, roughness: 0.42, vertexColors: true, key: 'rifleWood' }) };
+    out.grip = { geo: grip, mat: G.mat({ map: gripTex, normalMap: lowQ ? null : TX.normalOf(gripTex, 3), normalScale: 0.9, roughness: 0.55, key: 'rifleGrip' }) };
+    // ---- blued steel: receiver, barrel, bolt shroud, trigger guard, floorplate, scope bases, sling studs ----
+    var steel = [];
+    steel.push(lathe([[0.108, 0.0], [0.104, 0.009], [0.098, 0.0125], [0.075, 0.0128], [0.073, 0.0166], [-0.11, 0.0166], [-0.116, 0.0158], [-0.122, 0.0138]], BORE, lowQ ? 14 : 24, true));
+    steel.push(lathe([[-0.12, 0.0138], [-0.2, 0.0128], [-0.45, 0.0112], [-0.69, 0.0093], [-0.715, 0.0093], [-0.72, 0.0084], [-0.7205, 0.0035]], BORE, lowQ ? 12 : 20, true));
+    steel.push(G.tube([[0, -0.072, 0.012], [0, -0.108, 0.014], [0, -0.115, 0.046], [0, -0.104, 0.077], [0, -0.079, 0.08]], 0.0034, { radial: 8, steps: 4, sq: 3 }));
+    steel.push(G.tube([[0, -0.074, 0.04], [0, -0.09, 0.041], [0, -0.1, 0.047]], [0.0034, 0.0028, 0.0024], { radial: 8, steps: 3 }));
+    steel.push(G.organicBody([sec(0.01, -0.0995, 0.026, 0.004, 0.0035, 4), sec(-0.04, -0.1015, 0.028, 0.004, 0.004, 4), sec(-0.085, -0.0985, 0.024, 0.004, 0.0035, 4)], { radial: 12, steps: 2, density: 30 }));
+    [-0.095, 0.03].forEach(function (z) {
+      steel.push(lathe([[z + 0.007, 0.0128], [z + 0.006, 0.0152], [z - 0.006, 0.0152], [z - 0.007, 0.0128]], 0, lowQ ? 14 : 24, true));
+      steel.push(G.organicBody([sec(z + 0.006, -0.026, 0.016, 0.01, 0.01, 6), sec(z - 0.006, -0.026, 0.016, 0.01, 0.01, 6)], { radial: 12, steps: 1, density: 30 }));
+    });
+    steel.push(G.tube([[0, -0.098, -0.3], [0, -0.087, -0.3]], 0.004, { radial: 8 })); steel.push(G.tube([[0, -0.165, 0.4], [0, -0.17, 0.39]], 0.004, { radial: 8 }));
+    // ejection port (dark recess)
+    var port = G.organicBody([sec(-0.005, BORE + 0.004, 0.034, 0.0095, 0.0095, 5), sec(-0.07, BORE + 0.004, 0.034, 0.0095, 0.0095, 5)], { radial: 16, steps: 1, density: 30 });
+    G.paint(port, function (c, x) { c.set(x > 0.005 ? '#0d0e10' : '#30353f'); });
+    steel.push(port);
+    var steelGeo = G.merge(steel); G.ensureColor(steelGeo);
+    G.vertexAO(steelGeo, { cells: 14, strength: 0.35, min: 0.7 });
+    var blued = TX.metal('blued');
+    out.steel = { geo: steelGeo, mat: G.mat({ map: blued, normalMap: null, roughness: 0.32, metalness: 0.88, vertexColors: true, envMapIntensity: 1.3, key: 'blued' }) };
+    // ---- scope: matte black anodised tube, turrets, lenses ----
+    var scope = [lathe([[0.121, 0.0188], [0.118, 0.0207], [0.09, 0.0207], [0.084, 0.0196], [0.07, 0.0192], [0.048, 0.0136], [0.035, 0.0127], [-0.025, 0.0127], [-0.028, 0.0158], [-0.078, 0.0158], [-0.081, 0.0127], [-0.132, 0.0127], [-0.168, 0.0195], [-0.196, 0.0242], [-0.234, 0.0242], [-0.238, 0.0228]], 0, lowQ ? 16 : 32, true)];
+    scope.push(lathe([[0.121, 0.0188], [0.119, 0.0172], [0.11, 0.016]], 0, 24, true));
+    scope.push(lathe([[-0.238, 0.0228], [-0.236, 0.021], [-0.229, 0.0205]], 0, 24, true));
+    scope.push(G.tube([[0, 0.0145, -0.053], [0, 0.0235, -0.053], [0, 0.0315, -0.053]], [0.0105, 0.0112, 0.0112], { radial: lowQ ? 12 : 22, steps: 1, linear: true, capEnd: true, capBulge: 0.05 }));
+    scope.push(G.tube([[0.0145, 0, -0.053], [0.0235, 0, -0.053], [0.0315, 0, -0.053]], [0.0105, 0.0112, 0.0112], { radial: lowQ ? 12 : 22, steps: 1, linear: true, capEnd: true, capBulge: 0.05 }));
+    scope.push(G.tube([[-0.0145, 0.003, -0.05], [-0.022, 0.003, -0.05]], [0.0072, 0.0072], { radial: 14, steps: 1, linear: true, capEnd: true, capBulge: 0.05 }));
+    var scopeGeo = G.merge(scope); G.ensureColor(scopeGeo);
+    G.paint(scopeGeo, function (c, x, y, z) { c.set(z < -0.227 || z > 0.112 ? '#b0a58a' : '#ffffff'); if (z > 0.088 && z < 0.12 && Math.sqrt(x * x + y * y) > 0.0195) c.set('#5a5a5a'); });
+    var blk = TX.metal('black');
+    out.scope = { geo: scopeGeo, mat: G.mat({ map: blk, roughness: 0.48, metalness: 0.5, vertexColors: true, envMapIntensity: 1.1, key: 'scopeBlack' }) };
+    var lens = G.merge([(function () { var d = new THREE.CircleGeometry(0.0176, 24); d.rotateY(0); d.translate(0, 0, 0.113); return d; })(), (function () { var d = new THREE.CircleGeometry(0.0206, 24); d.rotateY(Math.PI); d.translate(0, 0, -0.229); return d; })()]);
+    out.lens = { geo: lens, mat: G.mat({ color: '#1d3340', roughness: 0.04, metalness: 0.95, emissive: '#081218', envMapIntensity: 2.2, key: 'scopeLens' }) };
+    // ---- bolt (moves): body + handle + knob, origin on the bore axis ----
+    var bolt = [lathe([[0.12, 0.0], [0.116, 0.0098], [0.07, 0.0098], [-0.06, 0.0092]], 0, lowQ ? 12 : 20, true)];
+    bolt.push(G.tube([[0.008, 0, 0.062], [0.03, -0.005, 0.066], [0.043, -0.017, 0.07], [0.047, -0.022, 0.071]], [0.0042, 0.004, 0.0037, 0.0036], { radial: 10, steps: 3 }));
+    var knob = new THREE.SphereGeometry(0.0088, 18, 14); knob.scale(1, 1.05, 1.15); knob.translate(0.049, -0.026, 0.072); bolt.push(knob);
+    var boltGeo = G.merge(bolt); G.ensureColor(boltGeo);
+    out.bolt = { geo: boltGeo, mat: out.steel.mat, matBright: G.mat({ map: TX.metal('stainless'), roughness: 0.25, metalness: 0.95, envMapIntensity: 1.4, key: 'boltSteel' }) };
+    var brass = new THREE.CylinderGeometry(0.0059, 0.006, 0.07, 12); brass.rotateX(Math.PI / 2);
+    out.brass = { geo: brass, mat: G.mat({ color: '#c9a04e', roughness: 0.3, metalness: 1, envMapIntensity: 1.5, key: 'brass' }) };
+    for (var k in out) out[k].geo.userData.shared = true;
+    rifleCache[key] = out;
+    return out;
+  }
   HG.weaponTypes.hunting_rifle = {
     name: 'Hunting Rifle', desc: 'Reliable bolt-action with a 4x scope. Your first trophy-taker.',
     slot: 'primary', ammo: 'rifle_ammo', price: 0, levelReq: 1,
     damage: 95, pellets: 1, spread: 0.035, fireDelay: 1.15, magSize: 5, reloadTime: 2.4, range: 320,
     zoom: 22, scope: true, projectile: 'hitscan', muzzleVelocity: 820, gravity: 5, noise: 1, recoil: 0.07,
     sound: { type: 'rifle', freq: 1 },
-    hipPos: [0.2, -0.215, -0.5], aimPos: [0, -0.012, -0.3],
+    hipPos: [0.19, -0.2, -0.46], aimPos: [0, -0.002, -0.3],
+    iconColors: { wood: '#7a4524', metal: '#2b3240', scope: '#1b1d20' },
     stats: { Damage: 0.7, Range: 0.75, Stability: 0.55, 'Fire rate': 0.2 },
     buildViewModel: function () {
-      var wood = '#9a6438', woodD = '#74482a', metal = '#3a3f46', black = '#24272c';
-      var g = [
-        // scope (sight line at y=0)
-        M.cyl(0.021, 0.021, 0.24, 10, black, { rot: [PI / 2, 0, 0], pos: [0, 0, -0.06] }),
-        M.cyl(0.03, 0.022, 0.07, 10, black, { rot: [PI / 2, 0, 0], pos: [0, 0, -0.205] }),
-        M.cyl(0.026, 0.021, 0.05, 10, black, { rot: [PI / 2, 0, 0], pos: [0, 0, 0.085] }),
-        M.cyl(0.024, 0.024, 0.004, 10, '#5d8fb0', { rot: [PI / 2, 0, 0], pos: [0, 0, 0.112] }),
-        M.cyl(0.029, 0.029, 0.004, 10, '#4b7a98', { rot: [PI / 2, 0, 0], pos: [0, 0, -0.242] }),
-        M.cyl(0.0225, 0.0225, 0.012, 10, '#c9a24a', { rot: [PI / 2, 0, 0], pos: [0, 0, -0.15] }),
-        M.cyl(0.012, 0.012, 0.03, 6, metal, { pos: [0, 0.022, -0.06] }),
-        M.box(0.016, 0.03, 0.02, metal, { pos: [0, -0.03, -0.12] }), M.box(0.016, 0.03, 0.02, metal, { pos: [0, -0.03, 0.02] }),
-        // receiver + barrel
-        M.box(0.044, 0.05, 0.26, metal, { pos: [0, -0.06, -0.04] }),
-        M.cyl(0.011, 0.013, 0.56, 8, metal, { rot: [PI / 2, 0, 0], pos: [0, -0.052, -0.44] }),
-        M.cyl(0.016, 0.016, 0.03, 8, black, { rot: [PI / 2, 0, 0], pos: [0, -0.052, -0.71] }),
-        // bolt handle
-        M.cyl(0.006, 0.006, 0.06, 5, metal, { rot: [0, 0, PI / 2], pos: [0.045, -0.055, 0.04] }),
-        M.sphere(0.011, metal, { pos: [0.078, -0.055, 0.04] }),
-        // stock + forend (wood)
-        M.box(0.05, 0.05, 0.36, wood, { pos: [0, -0.095, -0.3], jitter: 0.05 }),
-        M.box(0.048, 0.07, 0.2, wood, { pos: [0, -0.1, 0.12], jitter: 0.05 }),
-        M.box(0.046, 0.06, 0.18, wood, { pos: [0, -0.13, 0.26], rot: [-0.22, 0, 0], jitter: 0.05 }),
-        M.box(0.05, 0.13, 0.06, woodD, { pos: [0, -0.15, 0.38] }),
-        M.box(0.03, 0.035, 0.06, metal, { pos: [0, -0.1, 0.02] }) // trigger guard
-      ].concat(HG.model.arms({ right: [0.03, -0.135, 0.12], left: [0, -0.125, -0.3] }));
-      var grp = new THREE.Group();
-      grp.add(M.mesh(g));
-      grp.userData.muzzle = { x: 0, y: -0.052, z: -0.73 };
+      var P = buildRifleParts(), grp = new THREE.Group();
+      ['wood', 'grip', 'steel', 'scope', 'lens'].forEach(function (k) { var m = new THREE.Mesh(P[k].geo, P[k].mat); grp.add(m); });
+      var bolt = new THREE.Group(); bolt.position.set(0, -0.05, 0);
+      var bm = new THREE.Mesh(P.bolt.geo, P.bolt.matBright); bolt.add(bm); grp.add(bolt);
+      var shell = new THREE.Mesh(P.brass.geo, P.brass.mat); shell.visible = false; grp.add(shell);
+      var arms = G.fpArms({
+        right: { pos: [0.033, -0.107, 0.152], basis: [[0, -0.84, 0.54], [1, 0, 0]], pose: 'trigger', arm: [0.32, -0.42, 0.85], armLen: 0.36 },
+        left: { pos: [-0.058, -0.103, -0.215], basis: [[0, 0.08, -1], [-0.1, -1, 0]], pose: 'support', arm: [-0.42, -0.5, 0.76], armLen: 0.42 }
+      });
+      grp.add(arms);
+      grp.userData.muzzle = { x: 0, y: -0.05, z: -0.735 };
+      var leftHand = arms.userData.left, lh0 = leftHand ? leftHand.position.clone() : null, lq0 = leftHand ? leftHand.quaternion.clone() : null;
+      var sh = { t: -1, v: new THREE.Vector3(), lastShot: -9 }, tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler();
+      // bolt cycle after a shot + reload: open bolt, feed rounds, close
+      grp.userData.animate = function (w, dt) {
+        var since = HG.time - w.lastShot, cyc = Math.min(1.05, HG.weaponStat(w.def, 'fireDelay') || 1.15), lift = 0, pull = 0;
+        if (since >= 0 && since < cyc) {
+          var t = since / cyc;
+          lift = U.smooth(0.18, 0.32, t) * (1 - U.smooth(0.78, 0.92, t));
+          pull = U.smooth(0.34, 0.5, t) * (1 - U.smooth(0.56, 0.74, t));
+          if (t > 0.45 && sh.lastShot !== w.lastShot) { sh.lastShot = w.lastShot; sh.t = 0; shell.position.set(0.015, -0.045, -0.04); sh.v.set(0.9 + Math.random() * 0.3, 0.7, 0.15); shell.visible = true; }
+        }
+        if (w.reloading) {
+          var rp = 1 - w.reloadT / w.reloadDur;
+          lift = Math.max(lift, U.smooth(0.0, 0.12, rp) * (1 - U.smooth(0.86, 0.96, rp)));
+          pull = Math.max(pull, U.smooth(0.1, 0.2, rp) * (1 - U.smooth(0.76, 0.86, rp)));
+          if (leftHand) {
+            var feed = U.smooth(0.18, 0.3, rp) * (1 - U.smooth(0.66, 0.78, rp)), bob = Math.sin(rp * Math.PI * 8) * 0.012 * feed;
+            leftHand.position.set(lh0.x + (0.06 - lh0.x) * feed, lh0.y + (-0.03 - lh0.y) * feed + bob, lh0.z + (0.0 - lh0.z) * feed);
+            tmpE.set(-0.6 * feed, 0.4 * feed, 0.9 * feed); tmpQ.setFromEuler(tmpE); leftHand.quaternion.copy(lq0).multiply(tmpQ);
+          }
+        } else if (leftHand) { leftHand.position.copy(lh0); leftHand.quaternion.copy(lq0); }
+        bolt.rotation.z = lift * 1.05;
+        bolt.position.z = pull * 0.085;
+        if (sh.t >= 0) {
+          sh.t += dt; sh.v.y -= 6 * dt; shell.position.addScaledVector(sh.v, dt); shell.rotation.x += dt * 14; shell.rotation.y += dt * 9;
+          if (sh.t > 0.6) { sh.t = -1; shell.visible = false; }
+        }
+      };
       return grp;
     }
   };
@@ -3933,27 +6747,27 @@
 
   /* ---------- animals ---------- */
   function deerIcon(ctx, w, h) {
-    ctx.save(); ctx.translate(w / 2, h / 2 + 4); var s = Math.min(w / 120, h / 80); ctx.scale(s, s);
-    ctx.fillStyle = '#c99566'; ctx.strokeStyle = '#efe2c6'; ctx.lineWidth = 3; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.ellipse(0, 0, 32, 14, 0, 0, TAU); ctx.fill();
-    [[-24, 6], [-14, 8], [16, 8], [26, 6]].forEach(function (p) { ctx.fillRect(p[0] - 3, p[1], 6, 26); });
-    ctx.beginPath(); ctx.moveTo(-22, -6); ctx.lineTo(-34, -28); ctx.lineTo(-26, -32); ctx.lineTo(-14, -6); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(-36, -30, 10, 6, 0.4, 0, TAU); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(-32, -36); ctx.lineTo(-28, -52); ctx.lineTo(-20, -60); ctx.moveTo(-29, -48); ctx.lineTo(-38, -56); ctx.moveTo(-36, -36); ctx.lineTo(-44, -50); ctx.lineTo(-52, -54); ctx.stroke();
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(32, -6, 5, 7, 0.5, 0, TAU); ctx.fill();
+    ctx.save(); ctx.translate(w / 2, h / 2 + 6); var s = Math.min(w / 120, h / 84); ctx.scale(s, s);
+    var g = ctx.createLinearGradient(0, -40, 0, 30); g.addColorStop(0, '#9a7656'); g.addColorStop(1, '#c9a882');
+    ctx.fillStyle = g; ctx.strokeStyle = '#efe2c6'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(34, -6); ctx.bezierCurveTo(30, -16, 0, -16, -20, -14); ctx.bezierCurveTo(-26, -20, -30, -34, -34, -42); ctx.lineTo(-44, -42); ctx.lineTo(-52, -36); ctx.lineTo(-46, -32);
+    ctx.bezierCurveTo(-42, -28, -40, -16, -34, -2); ctx.lineTo(-30, 10); ctx.lineTo(-29, 30); ctx.lineTo(-26, 30); ctx.lineTo(-24, 10); ctx.lineTo(-18, 6); ctx.lineTo(-16, 30); ctx.lineTo(-13, 30); ctx.lineTo(-12, 6);
+    ctx.bezierCurveTo(0, 8, 14, 8, 20, 4); ctx.lineTo(22, 30); ctx.lineTo(25, 30); ctx.lineTo(27, 8); ctx.lineTo(30, 30); ctx.lineTo(33, 30); ctx.lineTo(34, 4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(36, -8, 4, 7, 0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#ede0c4'; ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(-38, -42); ctx.quadraticCurveTo(-28, -62, -14, -58); ctx.moveTo(-31, -54); ctx.lineTo(-30, -64); ctx.moveTo(-22, -58); ctx.lineTo(-21, -68); ctx.stroke();
     ctx.restore();
   }
   function rabbitIcon(ctx, w, h) {
     ctx.save(); ctx.translate(w / 2, h / 2 + 8); var s = Math.min(w / 100, h / 70); ctx.scale(s, s);
-    ctx.fillStyle = '#b3a089';
-    ctx.beginPath(); ctx.ellipse(6, 4, 22, 15, 0, 0, TAU); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(-16, -8, 11, 9, 0, 0, TAU); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(-14, -30, 4, 14, 0.15, 0, TAU); ctx.fill(); ctx.beginPath(); ctx.ellipse(-6, -28, 4, 14, 0.4, 0, TAU); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(28, 0, 6, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#a8957c';
+    ctx.beginPath(); ctx.ellipse(6, 4, 22, 15, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(-16, -8, 11, 9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(-14, -30, 4, 14, 0.15, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.ellipse(-6, -28, 4, 14, 0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(28, 0, 6, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
   function leg(unused, color, hoof, len, r0, r1) {
-    // leg geometry hanging down from the pivot (y=0 .. -len)
+    // LEGACY: low-poly leg hanging down from the pivot (y=0 .. -len)
     return [
       M.cyl(r0, r0 * 0.75, len * 0.55, 5, color, { pos: [0, -len * 0.27, 0] }),
       M.cyl(r1, r1, len * 0.45, 5, color, { pos: [0, -len * 0.75, 0.02] }),
@@ -3961,64 +6775,29 @@
     ];
   }
   HG.makeLeg = leg;
+  var COAT_TINTS = ['#ffffff', '#f1ebe3', '#fff6ea', '#e8e4e0'];
   HG.animalTypes.whitetail_deer = {
     name: 'Whitetail Deer', rarity: 'common', baseCash: 140, xp: 45, weightRange: [45, 110], size: 1, hp: 100,
     speed: { walk: 1.5, run: 9.5 }, senses: { sight: 75, hearing: 60, smell: 95 }, temperament: 'skittish', group: [1, 4],
     habitats: ['pine_valley'], activeAt: 'any', gait: 'walk', stride: 2.4, grazePitch: -1.35, alertPitch: 0.3, tailLift: -2.3, radius: 0.45,
-    furColor: 0xa87445, sounds: { alert: 'deer_snort', flee: 'deer_snort' }, icon: deerIcon,
+    furColor: 0x8a6a4c, sounds: { alert: 'deer_snort', flee: 'deer_snort' }, icon: deerIcon,
     hitZones: [
-      { name: 'head', part: 'head', offset: new THREE.Vector3(0, 0.5, -0.42), radius: 0.15, mult: 3 },
-      { name: 'vital', offset: new THREE.Vector3(0, 0.98, -0.4), radius: 0.2, mult: 2.5 },
-      { name: 'body', offset: new THREE.Vector3(0, 1.0, 0.12), radius: 0.44, mult: 1 },
-      { name: 'body', part: 'head', offset: new THREE.Vector3(0, 0.22, -0.16), radius: 0.15, mult: 1 },
-      { name: 'leg', offset: new THREE.Vector3(0.17, 0.4, -0.46), radius: 0.11, mult: 0.5 },
-      { name: 'leg', offset: new THREE.Vector3(-0.17, 0.4, -0.46), radius: 0.11, mult: 0.5 },
-      { name: 'leg', offset: new THREE.Vector3(0.17, 0.42, 0.48), radius: 0.11, mult: 0.5 },
-      { name: 'leg', offset: new THREE.Vector3(-0.17, 0.42, 0.48), radius: 0.11, mult: 0.5 }
+      { name: 'head', part: 'head', offset: new THREE.Vector3(0, -0.05, -0.12), radius: 0.12, mult: 3 },
+      { name: 'vital', offset: new THREE.Vector3(0, 0.74, -0.3), radius: 0.18, mult: 2.5 },
+      { name: 'body', offset: new THREE.Vector3(0, 0.8, 0.12), radius: 0.4, mult: 1 },
+      { name: 'body', part: 'neck', offset: new THREE.Vector3(0, 0.18, -0.12), radius: 0.14, mult: 1 },
+      { name: 'leg', offset: new THREE.Vector3(0.11, 0.35, -0.36), radius: 0.09, mult: 0.5 },
+      { name: 'leg', offset: new THREE.Vector3(-0.11, 0.35, -0.36), radius: 0.09, mult: 0.5 },
+      { name: 'leg', offset: new THREE.Vector3(0.11, 0.38, 0.45), radius: 0.1, mult: 0.5 },
+      { name: 'leg', offset: new THREE.Vector3(-0.11, 0.38, 0.45), radius: 0.1, mult: 0.5 }
     ],
     buildMesh: function (opts) {
-      var tan = '#a87445', back = '#8a5b34', belly = '#eadcc2', white = '#f4efe4', dark = '#2a211c', antler = '#e3d3b0';
-      var buck = (opts && opts.legendary) || Math.random() < 0.5;
-      var root = new THREE.Group();
-      var body = [
-        M.sphere(0.5, tan, { scale: [0.6, 0.6, 1.42], pos: [0, 1.0, 0.06], wseg: 8, hseg: 6, jitter: 0.04 }),
-        M.sphere(0.5, back, { scale: [0.5, 0.25, 1.2], pos: [0, 1.22, 0.06], wseg: 7, hseg: 4 }),
-        M.sphere(0.45, belly, { scale: [0.5, 0.36, 1.12], pos: [0, 0.86, 0.05], wseg: 7, hseg: 4 }),
-        M.sphere(0.3, tan, { scale: [0.95, 0.95, 1], pos: [0, 1.0, 0.52], wseg: 7, hseg: 5 })
-      ];
-      root.add(M.mesh(body));
-      // neck + head on one pivot at the shoulders (rotation.x < 0 lowers the head)
-      var head = new THREE.Group(); head.position.set(0, 1.12, -0.5);
-      var hg = [
-        M.cyl(0.13, 0.2, 0.6, 6, tan, { rot: [-0.6, 0, 0], pos: [0, 0.24, -0.15], jitter: 0.04 }),
-        M.box(0.13, 0.2, 0.1, white, { pos: [0, 0.18, -0.26], rot: [-0.55, 0, 0] }),
-        M.box(0.2, 0.21, 0.3, tan, { pos: [0, 0.52, -0.38], jitter: 0.05 }),
-        M.box(0.14, 0.13, 0.2, back, { pos: [0, 0.47, -0.58] }),
-        M.box(0.08, 0.06, 0.05, dark, { pos: [0, 0.49, -0.69] }),
-        M.box(0.03, 0.03, 0.03, dark, { pos: [0.1, 0.56, -0.44] }), M.box(0.03, 0.03, 0.03, dark, { pos: [-0.1, 0.56, -0.44] }),
-        M.cone(0.06, 0.2, 4, tan, { pos: [0.13, 0.68, -0.3], rot: [0, 0, -0.75] }), M.cone(0.06, 0.2, 4, tan, { pos: [-0.13, 0.68, -0.3], rot: [0, 0, 0.75] })
-      ];
-      if (buck) {
-        [1, -1].forEach(function (sd) {
-          hg.push(M.cyl(0.016, 0.022, 0.3, 4, antler, { pos: [sd * 0.1, 0.76, -0.32], rot: [0.45, 0, -sd * 0.45] }));
-          hg.push(M.cyl(0.014, 0.018, 0.26, 4, antler, { pos: [sd * 0.17, 0.92, -0.42], rot: [-0.7, 0, -sd * 0.2] }));
-          var tines = opts && opts.legendary ? 4 : 2;
-          for (var i = 0; i < tines; i++) hg.push(M.cyl(0.008, 0.013, 0.13, 4, antler, { pos: [sd * (0.13 + i * 0.015), 0.95 + i * 0.02, -0.36 - i * 0.07], rot: [0.1, 0, -sd * 0.1] }));
-        });
-      }
-      head.add(M.mesh(hg));
-      root.add(head);
-      // legs: FL, FR, BL, BR (pivots at the hips)
-      var legs = [];
-      [[0.17, 0.92, -0.42], [-0.17, 0.92, -0.42], [0.17, 0.95, 0.48], [-0.17, 0.95, 0.48]].forEach(function (p) {
-        var piv = new THREE.Group(); piv.position.set(p[0], p[1], p[2]);
-        piv.add(M.mesh(leg(null, tan, dark, p[1], 0.085, 0.04)));
-        root.add(piv); legs.push(piv);
-      });
-      var tail = new THREE.Group(); tail.position.set(0, 1.14, 0.78);
-      tail.add(M.mesh([M.box(0.12, 0.22, 0.05, back, { pos: [0, -0.1, 0.02], rot: [0.25, 0, 0] }), M.box(0.1, 0.18, 0.04, white, { pos: [0, -0.1, 0.05], rot: [0.25, 0, 0] })]));
-      root.add(tail);
-      return { root: root, legs: legs, head: head, tail: tail };
+      var buck = (opts && opts.legendary) || (opts && opts.buck) || (!(opts && opts.doe) && Math.random() < 0.5);
+      var tpl = G.quadruped(deerSpec(buck));
+      var tines = opts && opts.legendary ? 4 : 2 + Math.floor(Math.random() * 2.2);
+      var parts = G.spawnQuadruped(tpl, { tint: COAT_TINTS[Math.floor(Math.random() * COAT_TINTS.length)], variant: buck ? Math.min(4, tines) : null });
+      parts.buck = buck;
+      return parts;
     }
   };
   HG.animalTypes.rabbit = {
@@ -4027,37 +6806,13 @@
     habitats: ['pine_valley'], activeAt: 'any', gait: 'hop', stride: 4.5, grazePitch: -0.5, alertPitch: 0.25, tailLift: -0.6, radius: 0.15,
     furColor: 0x9a8670, sounds: { alert: 'rabbit_squeak' }, icon: rabbitIcon,
     hitZones: [
-      { name: 'head', part: 'head', offset: new THREE.Vector3(0, 0.05, -0.06), radius: 0.08, mult: 3 },
-      { name: 'vital', offset: new THREE.Vector3(0, 0.21, -0.06), radius: 0.09, mult: 2 },
-      { name: 'body', offset: new THREE.Vector3(0, 0.2, 0.06), radius: 0.15, mult: 1 },
-      { name: 'leg', offset: new THREE.Vector3(0, 0.06, 0.1), radius: 0.06, mult: 0.6 }
+      { name: 'head', part: 'head', offset: new THREE.Vector3(0, -0.005, -0.04), radius: 0.05, mult: 3 },
+      { name: 'vital', offset: new THREE.Vector3(0, 0.13, -0.06), radius: 0.07, mult: 2 },
+      { name: 'body', offset: new THREE.Vector3(0, 0.14, 0.04), radius: 0.11, mult: 1 },
+      { name: 'leg', offset: new THREE.Vector3(0, 0.05, 0.06), radius: 0.05, mult: 0.6 }
     ],
     buildMesh: function () {
-      var fur = '#8f7d69', belly = '#d9cfbf', white = '#f7f3ea', dark = '#2a211c', pink = '#d9a3a0';
-      var root = new THREE.Group();
-      root.add(M.mesh([
-        M.sphere(0.16, fur, { scale: [0.85, 0.8, 1.2], pos: [0, 0.2, 0.03], jitter: 0.05 }),
-        M.sphere(0.13, belly, { scale: [0.7, 0.6, 1], pos: [0, 0.16, 0.0] })
-      ]));
-      var head = new THREE.Group(); head.position.set(0, 0.28, -0.12);
-      head.add(M.mesh([
-        M.sphere(0.095, fur, { scale: [0.9, 0.9, 1.1], pos: [0, 0.04, -0.06] }),
-        M.box(0.035, 0.2, 0.025, fur, { pos: [0.035, 0.2, 0.0], rot: [0.25, 0, -0.12] }), M.box(0.035, 0.2, 0.025, fur, { pos: [-0.035, 0.2, 0.0], rot: [0.25, 0, 0.12] }),
-        M.box(0.02, 0.15, 0.01, pink, { pos: [0.035, 0.2, -0.014], rot: [0.25, 0, -0.12] }), M.box(0.02, 0.15, 0.01, pink, { pos: [-0.035, 0.2, -0.014], rot: [0.25, 0, 0.12] }),
-        M.box(0.02, 0.02, 0.02, dark, { pos: [0.06, 0.07, -0.1] }), M.box(0.02, 0.02, 0.02, dark, { pos: [-0.06, 0.07, -0.1] }),
-        M.box(0.025, 0.02, 0.02, pink, { pos: [0, 0.03, -0.16] })
-      ]));
-      root.add(head);
-      var legs = [];
-      [[0.06, 0.12, -0.1, 0.12], [-0.06, 0.12, -0.1, 0.12], [0.08, 0.16, 0.12, 0.16], [-0.08, 0.16, 0.12, 0.16]].forEach(function (p, i) {
-        var piv = new THREE.Group(); piv.position.set(p[0], p[1], p[2]);
-        piv.add(M.mesh([M.box(0.04, p[3], i < 2 ? 0.04 : 0.09, i < 2 ? belly : fur, { pos: [0, -p[3] / 2, i < 2 ? 0 : -0.02] })]));
-        root.add(piv); legs.push(piv);
-      });
-      var tail = new THREE.Group(); tail.position.set(0, 0.24, 0.2);
-      tail.add(M.mesh([M.sphere(0.05, white, { pos: [0, 0, 0.02] })]));
-      root.add(tail);
-      return { root: root, legs: legs, head: head, tail: tail };
+      return G.spawnQuadruped(G.quadruped(rabbitSpec()), { tint: COAT_TINTS[Math.floor(Math.random() * 3)] });
     }
   };
 
@@ -4073,14 +6828,12 @@
     var ds = U.dist2D(x, z, 0, 150); h = U.lerp(h, 3, U.smooth(40, 8, ds) * 0.6); // gentle spawn meadow
     return h + 2;
   }
+  // LEGACY low-poly flora factories (prepared vertex-coloured geometry). New content: HG.gfx.trees / HG.gfx.plant / HG.gfx.rock
   function pineGeo(rng, v) {
     var greens = [['#2c5631', '#356538', '#3f7340'], ['#3a6a38', '#447a3f', '#518a49'], ['#456f35', '#4f7d3c', '#5c8c45']][v % 3];
-    var tiers = v === 0 ? 4 : v === 1 ? 3 : 3, H = v === 2 ? 5.5 : v === 1 ? 10 : 8.5, w = v === 1 ? 2.2 : 2.7;
+    var tiers = v === 0 ? 4 : 3, H = v === 2 ? 5.5 : v === 1 ? 10 : 8.5, w = v === 1 ? 2.2 : 2.7;
     var g = [M.cyl(0.18, 0.3, H * 0.35, 5, '#5b3f2a', { pos: [0, H * 0.17, 0] })];
-    for (var i = 0; i < tiers; i++) {
-      var t = i / tiers, r = w * (1 - t * 0.62), hh = H * 0.42;
-      g.push(M.cone(r, hh, 7, greens[i % 3], { pos: [0, H * 0.28 + i * H * 0.2 + hh / 2, 0], rot: [0, rng() * 3, 0], jitter: 0.1, rng: rng }));
-    }
+    for (var i = 0; i < tiers; i++) { var t = i / tiers, r = w * (1 - t * 0.62), hh = H * 0.42; g.push(M.cone(r, hh, 7, greens[i % 3], { pos: [0, H * 0.28 + i * H * 0.2 + hh / 2, 0], rot: [0, rng() * 3, 0], jitter: 0.1, rng: rng })); }
     return M.merge(g);
   }
   function aspenGeo(rng) {
@@ -4099,11 +6852,7 @@
     var c = ['#8b8c86', '#7c7e78', '#9a978c'][v % 3];
     var g = [M.dodeca(0.9, c, { scale: [1.2, 0.65, 1], jitter: 0.12, rng: rng })];
     if (v === 1) g.push(M.dodeca(0.5, c, { pos: [0.8, -0.05, 0.3], scale: [1, 0.7, 1], jitter: 0.12, rng: rng }));
-    var m = M.merge(g);
-    // mossy tops
-    var pa = m.attributes.position.array, ca = m.attributes.color.array;
-    for (var i = 0; i < pa.length; i += 9) { if ((pa[i + 1] + pa[i + 4] + pa[i + 7]) / 3 > 0.35 && rng() < 0.5) for (var k = 0; k < 3; k++) { ca[i + k * 3] = 0.38; ca[i + k * 3 + 1] = 0.5; ca[i + k * 3 + 2] = 0.25; } }
-    return m;
+    return M.merge(g);
   }
   function grassGeo(rng, v) {
     var c = ['#7aa045', '#8db04f', '#6b9440'][v % 3], g = [];
@@ -4121,59 +6870,115 @@
     return M.merge(g);
   }
   HG.flora = { pine: pineGeo, aspen: aspenGeo, bush: bushGeo, rock: rockGeo, grass: grassGeo, flower: flowerGeo, reed: reedGeo };
+
+  /** Log cabin landmark (textured logs, shingle roof, stone chimney, porch, glowing window at night). */
+  G.buildCabin = function (ctx, cx, cz, rotY) {
+    var cy = ctx.heightAt(cx, cz), W = 6.2, D = 4.6, logR = 0.15, courses = 9, logs = [], planks = [], stone = [], roof = [], glass = [];
+    function log(x0, z0, x1, z1, y, r) {
+      var g = G.tube([[x0, y, z0], [(x0 + x1) / 2, y + 0.01, (z0 + z1) / 2], [x1, y, z1]], [r, r * 1.02, r * 0.98], { radial: 9, steps: 1, density: 1.2, capStart: true, capEnd: true, capBulge: 0.1 });
+      G.paint(g, function (c, x, yy, z, nx, ny, nz) { c.setRGB(1, 1, 1).multiplyScalar(0.85 + 0.15 * ny); }); logs.push(g);
+    }
+    for (var i = 0; i < courses; i++) {
+      var y = 0.12 + i * logR * 1.75, ext = 0.35;
+      if (i % 2 === 0) {
+        if (i < 6) { log(-W / 2 - ext, -D / 2, -0.55, -D / 2, y, logR); log(0.45, -D / 2, W / 2 + ext, -D / 2, y, logR); } else log(-W / 2 - ext, -D / 2, W / 2 + ext, -D / 2, y, logR);
+        log(-W / 2 - ext, D / 2, W / 2 + ext, D / 2, y, logR);
+      } else {
+        if (i >= 2 && i <= 5) { log(-W / 2, -D / 2 - ext, -W / 2, -0.5, y, logR); log(-W / 2, 0.5, -W / 2, D / 2 + ext, y, logR); } else log(-W / 2, -D / 2 - ext, -W / 2, D / 2 + ext, y, logR);
+        log(W / 2, -D / 2 - ext, W / 2, D / 2 + ext, y, logR);
+      }
+    }
+    var wallTop = 0.12 + courses * logR * 1.75, ridge = wallTop + 1.9;
+    // gables (planks) + door + shutters
+    [-1, 1].forEach(function (sd) {
+      var g = new THREE.BufferGeometry(), x = sd * W / 2;
+      g.setAttribute('position', new THREE.Float32BufferAttribute([x, wallTop - 0.1, -D / 2 - 0.05, x, wallTop - 0.1, D / 2 + 0.05, x, ridge, 0], 3));
+      g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 2.4, 0, 1.2, 1], 2)); g.computeVertexNormals();
+      planks.push(g);
+    });
+    var dg = new THREE.PlaneGeometry(0.95, 2.0); dg.rotateY(Math.PI); dg.translate(-0.05, 1.1, -D / 2 - 0.12); planks.push(dg);
+    var g2 = new THREE.PlaneGeometry(0.9, 0.7); g2.rotateY(-Math.PI / 2); g2.translate(-W / 2 - 0.13, 1.5, 0); glass.push(g2);
+    var frame = new THREE.PlaneGeometry(1.1, 0.85); frame.rotateY(-Math.PI / 2); frame.translate(-W / 2 - 0.125, 1.5, 0); planks.push(frame);
+    // roof slabs
+    [-1, 1].forEach(function (sd) {
+      var rw = Math.sqrt((D / 2 + 0.6) * (D / 2 + 0.6) + 1.9 * 1.9);
+      var g = new THREE.BoxGeometry(W + 1.2, 0.12, rw); var a = Math.atan2(1.9, D / 2 + 0.6);
+      g.translate(0, 0, sd * rw / 2); g.rotateX(sd * a); g.translate(0, ridge + 0.08, 0);
+      var uv = g.attributes.uv; for (var q = 0; q < uv.count; q++) uv.setXY(q, uv.getX(q) * 3, uv.getY(q) * 2);
+      roof.push(g);
+    });
+    var rc = G.tube([[-W / 2 - 0.6, ridge + 0.14, 0], [W / 2 + 0.6, ridge + 0.14, 0]], 0.1, { radial: 8, steps: 1, density: 1 }); logs.push(rc);
+    // chimney
+    var ch = new THREE.BoxGeometry(0.7, ridge + 1.2, 0.7); ch.translate(W / 2 - 1.2, (ridge + 1.2) / 2, D / 4);
+    var uvc = ch.attributes.uv; for (var u2 = 0; u2 < uvc.count; u2++) uvc.setXY(u2, uvc.getX(u2) * 0.7, uvc.getY(u2) * (ridge + 1.2) / 1.2);
+    stone.push(ch);
+    var cap = new THREE.BoxGeometry(0.85, 0.12, 0.85); cap.translate(W / 2 - 1.2, ridge + 1.25, D / 4); stone.push(cap);
+    // porch floor + posts
+    var porch = new THREE.BoxGeometry(W + 0.4, 0.1, 1.6); porch.translate(0, 0.08, -D / 2 - 0.85); planks.push(porch);
+    [-W / 2, W / 2].forEach(function (x) { logs.push(G.tube([[x, 0.1, -D / 2 - 1.5], [x, wallTop, -D / 2 - 1.5]], 0.09, { radial: 8, steps: 1, density: 1 })); });
+    var porchRoof = new THREE.BoxGeometry(W + 0.6, 0.08, 1.9); porchRoof.rotateX(-0.18); porchRoof.translate(0, wallTop + 0.15, -D / 2 - 0.9); roof.push(porchRoof);
+    // foundation stones
+    for (var f = 0; f < 10; f++) { var fx = -W / 2 + f * W / 9; var fs = new THREE.BoxGeometry(0.45, 0.3, 0.45); fs.translate(fx, -0.02, -D / 2); stone.push(fs); var fs2 = fs.clone(); fs2.translate(0, 0, D); stone.push(fs2); }
+    var root = new THREE.Group(); root.position.set(cx, cy, cz); root.rotation.y = rotY || 0;
+    function addM(list, mat, shadow) { if (!list.length) return; var m = new THREE.Mesh(G.merge(list), mat); m.castShadow = !!shadow; m.receiveShadow = true; root.add(m); return m; }
+    var logTex = TX.woodGrain({ base: '#8a6844', dark: '#4e3720', light: '#b08a5e', rings: 14, seed: 9 });
+    addM(logs, G.mat({ map: logTex, normalMap: G.isLow() ? null : TX.normalOf(logTex, 2), normalScale: 0.8, roughness: 0.85, vertexColors: true, key: 'cabinLogs' }), true);
+    addM(planks, G.mat({ map: TX.planks({ base: '#6e5236' }), roughness: 0.85, side: THREE.DoubleSide, key: 'cabinPlanks' }), true);
+    addM(roof, G.mat({ map: TX.shingles({ base: '#5b4434' }), roughness: 0.9, key: 'cabinRoof' }), true);
+    addM(stone, G.mat({ map: TX.stone(), normalMap: G.isLow() ? null : TX.normalOf(TX.stone(), 3), roughness: 0.92, key: 'cabinStone' }), true);
+    var gm = G.mat({ color: '#2a2418', emissive: '#ffb45a', emissiveIntensity: 0, roughness: 0.15, metalness: 0.3, key: 'cabinGlass' });
+    G.nightGlow.push(gm);
+    addM(glass, gm, false);
+    ctx.add(root);
+    return root;
+  };
+  G.nightGlow = [];
   HG.maps.pine_valley = {
     name: 'Pine Valley', desc: 'Rolling hills, a quiet lake and plenty of whitetail. The perfect place to learn the wind.',
     tagline: 'Whitetail country. Stay downwind.',
     levelReq: 1, price: 0, size: 420, height: pvHeight,
     groundColors: { base: '#5b8a3a', alt: '#80a046', slope: '#7a6142', low: '#c4b27c', high: '#8b8f86', highLevel: 24 },
-    fog: { color: '#d3e6df', near: 70, far: 275 }, skyTop: '#4b8fd6', skyBottom: '#d6ebe8', mountainColor: '#5f7a80', treeColor: '#2f5a32',
-    water: { level: -1.2, color: '#3a7d93' },
+    terrain: { base: 'meadow', rules: { rockLevel: 22, dirtNoise: 0.3 } },
+    fog: { color: '#cfe0e2', near: 70, far: 290 }, skyTop: '#3f86d4', skyBottom: '#d6ebe8', mountainColor: '#5a7380', treeColor: '#2f5a32',
+    water: { level: -1.2, color: '#3a7d93', shallow: '#5d8f80', deep: '#1b4658' },
     playerSpawn: { x: 0, z: 150, yaw: 0 },
     menuCamera: { x: 30, z: 40, r: 58, h: 15 },
     spawns: [{ type: 'whitetail_deer', weight: 6, max: 8 }, { type: 'rabbit', weight: 4, max: 6 }],
     maxAnimals: 14, startHour: 16.5,
     build: function (ctx) {
       var wl = ctx.waterLevel, rng = ctx.rng;
-      var forest = function (x, z) { var n = U.noise2(x * 0.011 + 3, z * 0.011 - 1); return U.clamp(0.12 + U.smooth(-0.25, 0.45, n) * 0.9, 0, 1); };
+      var forest = function (x, z) { var n = U.noise2(x * 0.011 + 3, z * 0.011 - 1); return U.clamp(0.1 + U.smooth(-0.25, 0.45, n) * 0.95, 0, 1); };
+      var open = function (x, z) { return 1 - forest(x, z) * 0.85; };
       // cabin landmark near spawn
-      var cx = 16, cz = 162, cy = ctx.heightAt(cx, cz);
-      ctx.clearArea(cx, cz, 9);
-      var cab = [
-        M.box(6, 3, 4.5, '#7a5236', { pos: [cx, cy + 1.4, cz], jitter: 0.05 }),
-        M.box(6.6, 0.25, 5.2, '#4a3324', { pos: [cx, cy - 0.05, cz] }),
-        M.box(0.9, 1.9, 0.1, '#3d2a1d', { pos: [cx - 1, cy + 0.95, cz - 2.27] }),
-        M.box(1.0, 0.8, 0.1, '#e6c27a', { pos: [cx + 1.6, cy + 1.7, cz - 2.27] }),
-        M.box(0.5, 2.4, 0.5, '#8b8c86', { pos: [cx + 2.4, cy + 3.6, cz + 1.2] })
-      ];
-      var roof = M.prep(new THREE.CylinderGeometry(0.01, 3.9, 2.0, 4, 1), '#6b3a2a', { rot: [0, PI / 4, 0], scale: [1.15, 1, 0.85], pos: [cx, cy + 3.95, cz] });
-      cab.push(roof);
-      ctx.addStatic(cab, { castShadow: true });
+      var cx = 16, cz = 162;
+      ctx.clearArea(cx, cz, 10);
+      G.buildCabin(ctx, cx, cz, 0);
       ctx.addCollider(cx, cz, 3.3, { h: 5, tag: 'cabin' });
       ctx.addCollider(cx - 2.2, cz, 2.6, { h: 5, tag: 'cabin' }); ctx.addCollider(cx + 2.2, cz, 2.6, { h: 5, tag: 'cabin' });
       // woodpile + campfire ring
-      var wp = [];
-      for (var i = 0; i < 6; i++) wp.push(M.cyl(0.18, 0.18, 1.4, 6, '#8a5a36', { rot: [0, 0, PI / 2], pos: [cx - 4, cy + 0.2 + (i % 3) * 0.32, cz + 1 + Math.floor(i / 3) * 0.36] }));
-      for (var j = 0; j < 8; j++) { var a = j / 8 * TAU; wp.push(M.dodeca(0.2, '#7c7e78', { pos: [cx - 5 + Math.cos(a) * 0.7, ctx.heightAt(cx - 5, cz - 6) + 0.08, cz - 6 + Math.sin(a) * 0.7] })); }
-      ctx.addStatic(wp);
-      // fallen logs
-      var logs = [];
-      for (var l = 0; l < 22; l++) {
-        var p = ctx.randomPoint({ slopeMax: 0.35, density: forest }); if (!p) continue;
-        var ry = rng() * PI, len = 3 + rng() * 3;
-        logs.push(M.cyl(0.25, 0.3, len, 7, '#6b4a30', { rot: [0, 0, PI / 2], pos: [0, 0.22, 0], jitter: 0.06, rng: rng }));
-        M.transform(logs[logs.length - 1], p.x, p.y, p.z, ry, 1);
-        var ex = Math.cos(ry) * len * 0.3, ez = -Math.sin(ry) * len * 0.3;
-        ctx.addCollider(p.x + ex, p.z + ez, 0.4, { h: 0.6, tag: 'log', cover: true }); ctx.addCollider(p.x - ex, p.z - ez, 0.4, { h: 0.6, tag: 'log', cover: true });
-      }
-      ctx.addStatic(logs, { castShadow: true });
-      // vegetation (instanced)
-      ctx.scatter(pineGeo, 720, { variants: 3, chunk: 105, scale: [0.75, 1.35], density: forest, slopeMax: 0.9, collider: 0.42, colliderHeight: 9, cover: true, tag: 'tree', castShadow: true, minH: wl + 1.2 });
-      ctx.scatter(aspenGeo, 110, { chunk: 140, scale: [0.8, 1.2], density: function (x, z) { return 1 - forest(x, z) * 0.8; }, slopeMax: 0.7, collider: 0.3, colliderHeight: 6, cover: true, tag: 'tree', castShadow: true, minH: wl + 1 });
-      ctx.scatter(bushGeo, 300, { variants: 3, scale: [0.7, 1.5], slopeMax: 0.9, collider: 0.7, colliderHeight: 1.3, cover: true, solid: false, tag: 'bush', minH: wl + 0.6, chunk: 80, viewDist: 160 });
-      ctx.scatter(rockGeo, 130, { variants: 3, scale: [0.5, 1.9], align: true, collider: 0.9, colliderHeight: 1.2, tag: 'rock', yOffset: -0.1, castShadow: true, chunk: 105, viewDist: 200 });
-      ctx.scatter(grassGeo, 1700, { variants: 2, scale: [0.7, 1.3], slopeMax: 0.7, minH: wl + 0.5, chunk: 60, viewDist: 75, lowMult: 0.45 });
-      ctx.scatter(flowerGeo, 320, { variants: 3, scale: [0.8, 1.2], slopeMax: 0.5, minH: wl + 0.8, chunk: 60, viewDist: 70, lowMult: 0.4, density: function (x, z) { return 1 - forest(x, z); } });
-      ctx.scatter(reedGeo, 160, { scale: [0.8, 1.3], minH: wl - 0.4, maxH: wl + 0.5, allowWater: true, chunk: 60, viewDist: 90 });
+      var cy = ctx.heightAt(cx - 4.6, cz + 1.2), pile = [];
+      for (var i = 0; i < 9; i++) { var lg = G.tube([[-0.6, 0, 0], [0.6, 0, 0]], 0.13 + (i % 3) * 0.015, { radial: 8, steps: 1, density: 1.5 }); G.xform(lg, [cx - 4.6, cy + 0.15 + Math.floor(i / 4) * 0.25, cz + 0.6 + (i % 4) * 0.27], [0, 0.04 * (i % 3), 0]); pile.push(lg); }
+      var pm = new THREE.Mesh(G.merge(pile), G.mat({ map: TX.bark({ style: 'pine', base: '#6b4a33' }), roughness: 0.9, key: 'woodpile' })); pm.castShadow = true; pm.receiveShadow = true; ctx.add(pm);
+      var ring = [], fy = ctx.heightAt(cx - 5, cz - 6);
+      for (var j = 0; j < 9; j++) { var a = j / 9 * Math.PI * 2, rg = G.rock({ size: 0.22, seed: 40 + j, mossAmount: 0 }).lod.geometry.clone(); G.xform(rg, [cx - 5 + Math.cos(a) * 0.75, fy + 0.06, cz - 6 + Math.sin(a) * 0.75], [0, a, 0]); ring.push(rg); }
+      var rm = new THREE.Mesh(G.merge(ring), G.rockMaterial()); rm.receiveShadow = true; ctx.add(rm);
+      // vegetation (instanced, LOD'd, wind)
+      var pines = [G.trees.pine({ height: 13, seed: 11, spread: 0.21 }), G.trees.pine({ height: 16, seed: 12, spread: 0.19 }), G.trees.pine({ height: 9, seed: 13, spread: 0.25 })];
+      ctx.scatter(function (r, v) { return pines[v]; }, 760, { variants: 3, chunk: 105, scale: [0.72, 1.3], density: forest, slopeMax: 0.9, collider: 0.4, colliderHeight: 9, cover: true, tag: 'tree', castShadow: true, minH: wl + 1.2, tint: ['#ffffff', '#e8f0de', '#f4efd8', '#dfe8e4'] });
+      var birches = [G.trees.birch({ height: 9.5, seed: 21 }), G.trees.birch({ height: 7.5, seed: 22 })];
+      ctx.scatter(function (r, v) { return birches[v]; }, 120, { variants: 2, chunk: 140, scale: [0.8, 1.2], density: function (x, z) { var f = forest(x, z); return f > 0.2 && f < 0.75 ? 0.9 : 0.25; }, slopeMax: 0.7, collider: 0.25, colliderHeight: 6, cover: true, tag: 'tree', castShadow: true, minH: wl + 1, tint: ['#ffffff', '#f6f0c8', '#e9f2d8'] });
+      ctx.scatter(function () { return G.trees.dead({ height: 8, seed: 31 }); }, 26, { chunk: 140, scale: [0.8, 1.3], density: forest, slopeMax: 0.8, collider: 0.3, colliderHeight: 6, cover: true, tag: 'tree', castShadow: true, minH: wl + 1 });
+      var bushes = [G.trees.bush({ size: 1.3, seed: 41 }), G.trees.bush({ size: 1.0, seed: 42 })];
+      ctx.scatter(function (r, v) { return bushes[v]; }, 340, { variants: 2, scale: [0.7, 1.5], slopeMax: 0.9, collider: 0.7, colliderHeight: 1.3, cover: true, solid: false, tag: 'bush', minH: wl + 0.6, chunk: 80, viewDist: 170, tint: ['#ffffff', '#f0f4d8', '#e4ecd8'] });
+      var rocks = [G.rock({ size: 1, seed: 51 }), G.rock({ size: 1, seed: 52, flat: 0.5, stretch: 1.5 }), G.rock({ size: 1, seed: 53, flat: 0.8 })];
+      ctx.scatter(function (r, v) { return rocks[v]; }, 130, { variants: 3, scale: [0.45, 1.6], align: true, collider: 0.9, colliderHeight: 1.2, tag: 'rock', yOffset: -0.12, castShadow: true, chunk: 105, viewDist: 220 });
+      ctx.scatter(function (r, v) { return rocks[v]; }, 16, { variants: 3, scale: [2.2, 3.4], align: true, collider: 2.2, colliderHeight: 2.5, cover: true, tag: 'rock', yOffset: -0.3, castShadow: true, chunk: 140, slopeMax: 0.6 });
+      var logs = [G.trees.log({ len: 4.5, r: 0.28, seed: 61 }), G.trees.log({ len: 3.2, r: 0.22, seed: 62 }), G.trees.log({ stump: true, r: 0.32, h: 0.55, seed: 63 })];
+      var lp = ctx.scatter(function (r, v) { return logs[v]; }, 60, { variants: 3, chunk: 140, scale: [0.8, 1.2], density: forest, slopeMax: 0.35, align: true, castShadow: true, viewDist: 160, tag: 'log' });
+      lp.points.forEach(function (p) { if (p.v === 2) ctx.addCollider(p.x, p.z, 0.35 * p.s, { h: 0.6, tag: 'stump', cover: true }); else { var ex = Math.cos(p.ry) * 1.3 * p.s, ez = -Math.sin(p.ry) * 1.3 * p.s; ctx.addCollider(p.x + ex, p.z + ez, 0.35, { h: 0.6, tag: 'log', cover: true }); ctx.addCollider(p.x - ex, p.z - ez, 0.35, { h: 0.6, tag: 'log', cover: true }); } });
+      ctx.scatter(function () { return G.plant('fern', { seed: 71 }); }, 650, { scale: [0.7, 1.3], density: forest, slopeMax: 0.8, minH: wl + 0.8, chunk: 70, viewDist: 62, lowMult: 0.4 });
+      ctx.scatter(function (r, v) { return G.plant(v ? 'dry' : 'flowers', { seed: 72 + v }); }, 520, { variants: 2, scale: [0.7, 1.2], slopeMax: 0.5, minH: wl + 0.8, chunk: 70, viewDist: 58, lowMult: 0.4, density: open });
+      ctx.scatter(function () { return G.plant('reeds', { seed: 74 }); }, 240, { scale: [0.8, 1.3], minH: wl - 0.45, maxH: wl + 0.45, allowWater: true, chunk: 70, viewDist: 95 });
     }
   };
 
