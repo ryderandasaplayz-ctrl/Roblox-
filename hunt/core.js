@@ -127,6 +127,7 @@
     baseFov: 70,
     daySpeed: 1 / 90,        // game hours per real second
     startHour: 16.5,
+    legendaryChance: 0,      // chance a spawned group leader is a legendary variant (gear.js/animals.js may raise it)
     trackDotMax: 260,
     particleMax: 120,
     gravity: 9.81
@@ -396,7 +397,7 @@
   };
   M.box = function (w, h, d, color, opts) { return M.prep(new THREE.BoxGeometry(w, h, d), color, opts); };
   M.cyl = function (rt, rb, h, seg, color, opts) { return M.prep(new THREE.CylinderGeometry(rt, rb, h, seg || 6), color, opts); };
-  M.cone = function (r, h, seg, color, opts) { return M.prep(new THREE.ConeGeometry(r, h, seg || 6), color, opts); };
+  M.cone = function (r, h, seg, color, opts) { return M.prep(new THREE.ConeGeometry(r, h, seg || 6, 1, !!(opts && opts.open)), color, opts); };
   M.sphere = function (r, color, opts) { opts = opts || {}; return M.prep(new THREE.SphereGeometry(r, opts.wseg || 7, opts.hseg || 5), color, opts); };
   M.ico = function (r, detail, color, opts) { return M.prep(new THREE.IcosahedronGeometry(r, detail || 0), color, opts); };
   M.dodeca = function (r, color, opts) { return M.prep(new THREE.DodecahedronGeometry(r, 0), color, opts); };
@@ -456,7 +457,7 @@
 
   HG.scene = new THREE.Scene();
   HG.scene.fog = new THREE.Fog(0xcfe0dc, 60, 260);
-  HG.camera = new THREE.PerspectiveCamera(HG.config.baseFov, 1, 0.1, 700);
+  HG.camera = new THREE.PerspectiveCamera(HG.config.baseFov, 1, 0.1, 1400);
   HG.camera.rotation.order = 'YXZ';
   HG.scene.add(HG.camera);
   /** View-model pass: a separate scene rendered after a depth clear so weapons never clip into terrain. */
@@ -488,7 +489,7 @@
     HG.camera.aspect = w / h; HG.camera.updateProjectionMatrix();
     HG.viewCamera.aspect = w / h;
     // keep the view model a consistent size in portrait
-    HG.viewCamera.fov = w < h ? 72 : 58;
+    HG.viewCamera.fov = w < h ? 80 : 58;
     HG.viewCamera.updateProjectionMatrix();
     HG.portrait = h > w;
     rootEl.classList.toggle('portrait', HG.portrait);
@@ -516,7 +517,7 @@
     ].join('\n'),
     side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false
   });
-  var sky = new THREE.Mesh(new THREE.SphereGeometry(600, 24, 12), skyMat);
+  var sky = new THREE.Mesh(new THREE.SphereGeometry(1000, 24, 12), skyMat);
   sky.renderOrder = -1000; sky.frustumCulled = false; sky.name = 'sky';
   HG.scene.add(sky);
 
@@ -600,7 +601,6 @@
       env.fogNear = (f.near || 60) * env.fogScale; env.fogFar = (f.far || 260) * env.fogScale;
       var nightFog = 0.75 + 0.25 * day;
       HG.scene.fog.near = env.fogNear * nightFog; HG.scene.fog.far = env.fogFar * nightFog;
-      HG.camera.far = Math.min(700, HG.scene.fog.far + 40); HG.camera.updateProjectionMatrix();
       // sun or moon
       if (elev > -0.05) {
         sun.color.copy(C_SUN_DAY).lerp(C_SUN_DUSK, dusk);
@@ -1151,6 +1151,14 @@
     joy.id = null; look.id = null; mouseDrag.down = false; placeJoyIdle();
     for (var id in actionBtns) if (actionBtns[id]._release) actionBtns[id]._release();
   };
+  // core gameplay keys (features add their own with HG.bindKey)
+  HG.bindKey('KeyR', function () { HG.reload(); }, 'Reload');
+  HG.bindKey('KeyC', function () { HG.setCrouch(!HG.player.crouch); }, 'Crouch');
+  HG.bindKey('KeyE', function () { if (!ui.triggerContext()) HG.emit('interact'); }, 'Interact');
+  HG.bindKey('KeyQ', function () { HG.cycleWeapon(1); }, 'Next weapon');
+  [1, 2, 3, 4, 5, 6, 7, 8, 9].forEach(function (n) {
+    HG.bindKey('Digit' + n, function () { var lo = HG.getLoadout(); if (lo[n - 1] && lo[n - 1] !== HG.weapon.id) { HG.switchWeapon(lo[n - 1]); ui.toast(HG.weaponTypes[lo[n - 1]].name, { duration: 1.2 }); } }, 'Weapon ' + n);
+  });
   /** Per-frame: compose move vector from keys/joystick. */
   function pollInput() {
     var k = input.keys, kx = 0, ky = 0;
@@ -1410,7 +1418,8 @@
       },
       /** Instanced scatter. factory(rng, variantIndex) -> prepared BufferGeometry (vertex colours) or {geometry, material}.
        *  opts: {variants:1, minH, maxH, slopeMax, area, density(x,z)->0..1, scale:[min,max], collider:r (scaled), colliderHeight,
-       *         cover:bool, solid:true (false = cover only, walk-through), tag, yOffset, align:bool (tilt to slope), castShadow, chunk:100, allowWater, margin, lowMult:0.6 (count multiplier on Low)}
+       *         cover:bool, solid:true (false = cover only, walk-through), tag, yOffset, align:bool (tilt to slope), castShadow, chunk:100 (m),
+       *         viewDist (m; chunks farther than this are hidden — use ~70 for grass/flowers), allowWater, margin, lowMult:0.6 (count multiplier on Low)}
        *  -> {count, points:[{x,y,z,s,ry,v}], meshes:[InstancedMesh]} */
       scatter: function (factory, count, opts) {
         opts = opts || {};
@@ -1458,7 +1467,7 @@
           im.castShadow = !!opts.castShadow; im.receiveShadow = !!opts.receiveShadow;
           im.userData.scatter = true;
           HG.mapRoot.add(im); meshes.push(im);
-          scatterChunks.push({ mesh: im, cx: mx, cz: mz, r: rad });
+          scatterChunks.push({ mesh: im, cx: mx, cz: mz, r: rad, view: opts.viewDist || 0 });
         }
         // the template geometries are only referenced through shared attributes now
         return { count: points.length, points: points, meshes: meshes };
@@ -1469,7 +1478,7 @@
   function disposeTree(root) {
     var geos = new Set(), mats = new Set();
     root.traverse(function (o) {
-      if (o.geometry) geos.add(o.geometry);
+      if (o.geometry && !(o.geometry.userData && o.geometry.userData.shared)) geos.add(o.geometry);
       if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (!m.userData || !m.userData.shared) mats.add(m); });
     });
     geos.forEach(function (g) { try { g.dispose(); } catch (e) {} });
@@ -1533,7 +1542,7 @@
     var cx = HG.camera.position.x, cz = HG.camera.position.z, far = HG.scene.fog.far + 8;
     for (var i = 0; i < scatterChunks.length; i++) {
       var c = scatterChunks[i], d = U.dist2D(cx, cz, c.cx, c.cz) - c.r;
-      c.mesh.visible = d < far;
+      c.mesh.visible = d < (c.view ? Math.min(far, c.view) : far);
     }
   }
 
@@ -1724,7 +1733,7 @@
       speed: 0, moveSpeed: 0, target: new THREE.Vector3(x, 0, z), threat: new THREE.Vector3(), threatType: '',
       awareness: 0, lastCause: '', group: opts.group || groupSeq++, leader: opts.leader || null,
       phase: Math.random() * TAU, bob: 0, alt: 0, headPitch: 0, tailLift: 0,
-      perceptT: Math.random() * 0.25, distToPlayer: 999, dotDist: 0, deadT: 0, fadeT: -1, tipDir: 1, attackCD: 0,
+      perceptT: Math.random() * 0.25, distToPlayer: U.dist2D(x, z, player.pos.x, player.pos.z), dotDist: 0, deadT: 0, fadeT: -1, tipDir: 1, attackCD: 0,
       noCount: !!opts.noCount, seenByPlayer: false, data: opts.data || {}, senses: defaultSenses(def)
     };
     a.goalYaw = a.yaw;
@@ -1815,9 +1824,13 @@
     }
     a.target.set(a.pos.x * 0.9, 0, a.pos.z * 0.9);
   }
-  /** Make an animal react to a threat at position p (e.g. a gunshot). strength 0..2 adds awareness. */
-  HG.alertAnimal = function (a, p, strength, cause) {
+  /** Make an animal react to a threat at position p (e.g. a gunshot). strength 0..2 adds awareness. delay (s) = reaction time. */
+  HG.alertAnimal = function (a, p, strength, cause, delay) {
     if (!a || a.dead) return;
+    if (delay > 0) {
+      if (!a._pendingAlert || a._pendingAlert.t > delay) a._pendingAlert = { t: delay, x: p.x, y: p.y || 0, z: p.z, s: strength, c: cause };
+      return;
+    }
     a.threat.set(p.x, p.y || 0, p.z); a.threatType = cause || 'noise'; a.lastCause = cause || 'noise';
     a.awareness = Math.min(2, a.awareness + (strength == null ? 1 : strength));
     if (a.awareness >= 1) react(a, a.lastCause);
@@ -1827,7 +1840,7 @@
     if (a.dead) return;
     var t = a.def.temperament || 'skittish';
     if (a.state === 'flee' || a.state === 'charge' || a.state === 'warn' || a.state === 'retreat') return;
-    var d = a.distToPlayer;
+    var d = a.distToPlayer = U.dist2D(a.pos.x, a.pos.z, player.pos.x, player.pos.z);
     var threatIsPlayer = a.threatType === 'player' || a.threatType === 'shot' || a.threatType === 'hit';
     if (threatIsPlayer && (t === 'aggressive' && d < Math.max(30, a.senses.sight * 0.7) || t === 'territorial' && d < (a.def.territory || 22)) && a.hp > a.maxHp * 0.3) {
       if (a.state !== 'warn') setState(a, 'warn');
@@ -2083,6 +2096,7 @@
       a.root.visible = U.dist2D(cam.x, cam.z, a.pos.x, a.pos.z) < far;
       if (a.dead) { updateDead(a, dt); continue; }
       a.stateTime += dt;
+      if (a._pendingAlert) { var pa = a._pendingAlert; pa.t -= dt; if (pa.t <= 0) { a._pendingAlert = null; _v6.set(pa.x, pa.y, pa.z); HG.alertAnimal(a, _v6, pa.s, pa.c); } }
       a.perceptT -= dt;
       if (a.perceptT <= 0) { a.perceptT = 0.2; perceive(a, 0.2); }
       var override = false;
@@ -2228,7 +2242,7 @@
   HG.weaponState = {}; // id -> {mag}
   var W = HG.weapon = {
     id: null, def: null, cooldown: 0, reloading: false, reloadT: 0, reloadDur: 1, aimT: 0, kick: 0, bloom: 0,
-    switchT: 0, model: null, flashT: 0, swayX: 0, swayY: 0, lastShot: -9, spreadNow: 0
+    switchT: 0, model: null, flashT: 0, swayX: 0, swayY: 0, lastShot: -9, spreadNow: 0, charging: false, charge: 0
   };
   /** Stat lookup used by the engine for every weapon stat (weapons.js may wrap this to apply attachments/upgrades). */
   HG.weaponStat = function (def, key) { return def ? def[key] : undefined; };
@@ -2294,7 +2308,7 @@
     var def = HG.weaponTypes[id]; if (!def) return false;
     if (W.id === id && W.model) return true;
     if (W.model) { HG.viewModel.remove(W.model); disposeTree(W.model); W.model = null; }
-    W.id = id; W.def = def; W.reloading = false; W.cooldown = 0.2; W.switchT = 0.35; W.aimT = 0;
+    W.id = id; W.def = def; W.reloading = false; W.cooldown = 0.2; W.switchT = 0.35; W.aimT = 0; W.charging = false; W.charge = 0;
     weaponMag(id);
     try { W.model = def.buildViewModel ? def.buildViewModel() : new THREE.Group(); } catch (e) { console.error('[HG] buildViewModel ' + id, e); W.model = new THREE.Group(); }
     HG.viewModel.add(W.model);
@@ -2435,7 +2449,8 @@
     var mesh = new THREE.Mesh((opts && opts.geometry) || def.projectileGeometry || getArrowGeo(), HG.vcMat);
     mesh.position.copy(origin);
     HG.scene.add(mesh);
-    var p = { mesh: mesh, vel: dir.clone().multiplyScalar(HG.weaponStat(def, 'muzzleVelocity') || 60), def: def, life: 0, stuck: false, travelled: 0, start: origin.clone(), weaponId: W.id };
+    var charge = opts && opts.charge != null ? opts.charge : 1;
+    var p = { mesh: mesh, vel: dir.clone().multiplyScalar((HG.weaponStat(def, 'muzzleVelocity') || 60) * (0.45 + 0.55 * charge)), def: def, life: 0, stuck: false, travelled: 0, start: origin.clone(), weaponId: W.id, charge: charge };
     projectiles.push(p);
     if (projectiles.length > 24) removeProjectile(projectiles[0]);
     return p;
@@ -2461,7 +2476,7 @@
         p.travelled += tMin;
         var dist = p.start.distanceTo(p.mesh.position);
         if (tMin === tA) {
-          applyShotHit({ animal: hitA.animal, zone: hitA.zone, zoneDef: hitA.zoneDef, point: p.mesh.position.clone(), distance: dist, surface: 'animal' }, p.def, p.weaponId);
+          applyShotHit({ animal: hitA.animal, zone: hitA.zone, zoneDef: hitA.zoneDef, point: p.mesh.position.clone(), distance: dist, surface: 'animal', charge: p.charge }, p.def, p.weaponId);
           removeProjectile(p);
         } else {
           p.stuck = true; p.life = 0;
@@ -2523,7 +2538,7 @@
         _v4.set(1, 0, 0).applyQuaternion(HG.camera.quaternion); _v5.set(0, 1, 0).applyQuaternion(HG.camera.quaternion);
         _v3.addScaledVector(_v4, Math.cos(th) * r).addScaledVector(_v5, Math.sin(th) * r).normalize();
       }
-      if (def.projectile === 'arrow') { HG.spawnProjectile(shotRay.origin, _v3, def); continue; }
+      if (def.projectile === 'arrow') { HG.spawnProjectile(shotRay.origin, _v3, def, { charge: opts.charge }); continue; }
       results.push(traceShot(shotRay.origin, _v3, range, mv, grav, !!opts.debug));
     }
     HG.emit('shoot', def, shotRay);
@@ -2532,7 +2547,8 @@
     for (var k = 0; k < HG.animals.length; k++) {
       var a = HG.animals[k]; if (a.dead) continue;
       var hr = a.senses.hearing * 4 * loud;
-      if (a.distToPlayer < hr) HG.alertAnimal(a, player.pos, 1.3 * (1 - a.distToPlayer / hr) + (a.def.temperament === 'skittish' ? 0.5 : 0.2), 'shot');
+      // animals react after a short, natural reaction time (lets arrows and follow-up shots land)
+      if (a.distToPlayer < hr) HG.alertAnimal(a, player.pos, 1.3 * (1 - a.distToPlayer / hr) + (a.def.temperament === 'skittish' ? 0.5 : 0.2), 'shot', 0.25 + Math.random() * 0.35 + a.distToPlayer / 340);
     }
     var anyHit = false;
     for (var j = 0; j < results.length; j++) {
@@ -2553,7 +2569,7 @@
     var zd = res.zoneDef || {}, mult = zd.mult == null ? 1 : zd.mult;
     var range = HG.weaponStat(def, 'range') || 250, dist = res.distance;
     var fall = dist > range ? Math.max(0.3, 1 - (dist - range) / range) : 1;
-    var dmg = (HG.weaponStat(def, 'damage') || 50) * mult * fall;
+    var dmg = (HG.weaponStat(def, 'damage') || 50) * mult * fall * (res.charge != null ? 0.4 + 0.6 * res.charge : 1);
     HG.save.stats.hits++;
     HG.particles.emit(res.point, 5, { color: a.def.furColor || 0xa58460, speed: 1, up: 1, life: 0.5, gravity: 3 });
     HG.sfx('hit', { pos: res.point });
@@ -2658,9 +2674,19 @@
     if (W.cooldown > 0) W.cooldown -= dt;
     if (W.switchT > 0) W.switchT -= dt;
     if (W.reloading) { W.reloadT -= dt; if (W.reloadT <= 0) finishReload(); }
-    // fire input
+    // fire input: fireMode 'press' (default) | 'auto' (hold = full auto) | 'release' (hold to draw/charge, release fires)
     var canAct = !HG.paused && HG.state === 'hunt';
-    if (canAct && (input.firePressed || (input.fire && wstat('auto', false)))) {
+    var mode = wstat('fireMode', wstat('auto', false) ? 'auto' : 'press');
+    if (mode === 'release') {
+      if (input.fire && canAct && !W.reloading && W.switchT <= 0 && W.cooldown <= 0 && weaponMag(W.id).mag > 0) {
+        if (!W.charging) { W.charging = true; W.charge = 0; HG.emit('drawStart', W.def); }
+        W.charge = Math.min(1, W.charge + rdt / wstat('drawTime', 0.8));
+      } else if (W.charging && !input.fire) {
+        W.charging = false;
+        if (canAct) HG.fire({ charge: Math.max(0.15, W.charge) });
+        W.charge = 0;
+      }
+    } else if (canAct && (input.firePressed || (input.fire && mode === 'auto'))) {
       if (player.sprint) { player.sprint = false; }
       HG.fire();
     }
@@ -2763,7 +2789,7 @@
   };
   ui.css(
     '.hg-hudbox{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:14px;background:rgba(10,20,15,.66);border:1.5px solid var(--panel-line)}' +
-    '.hg-bars{display:flex;flex-direction:column;gap:5px;min-width:118px}' +
+    '.hg-bars{flex-direction:column;align-items:stretch!important;gap:5px;min-width:128px}' +
     '.hg-bar{display:flex;align-items:center;gap:6px}.hg-bar svg{width:15px;height:15px;flex:none}' +
     '.hg-bar i{display:block;height:8px;flex:1;border-radius:6px;background:rgba(255,255,255,.14);overflow:hidden;position:relative}' +
     '.hg-bar i b{position:absolute;left:0;top:0;bottom:0;border-radius:6px;transition:width .2s}' +
@@ -3067,8 +3093,8 @@
    * Screens: menu, maps, shop, trophy card, summary, pause, settings
    * ------------------------------------------------------------------ */
   ui.css(
-    '.hg-menu{min-height:100%;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:8px 6px;background:linear-gradient(90deg,rgba(8,18,12,.82),rgba(8,18,12,.35) 55%,rgba(8,18,12,.1))}' +
-    '#scr-menu{background:none}' +
+    '.hg-menu{min-height:100%;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:8px 6px}' +
+    '#scr-menu{background:linear-gradient(90deg,rgba(8,18,12,.82),rgba(8,18,12,.35) 55%,rgba(8,18,12,.08))}' +
     '.hg-logo{display:flex;flex-direction:column;gap:6px}' +
     '.hg-logo .mark{width:54px;height:54px;color:var(--amber);filter:drop-shadow(0 3px 0 rgba(0,0,0,.4))}.hg-logo .mark svg{width:100%;height:100%}' +
     '.hg-logo h1{font-family:var(--display);font-weight:400;font-size:clamp(34px,8.5vmin,68px);line-height:.92;margin:0;color:var(--cream);text-shadow:0 4px 0 rgba(0,0,0,.35),0 10px 30px rgba(0,0,0,.4)}' +
@@ -3083,7 +3109,7 @@
     '.hg-menu-right .hg-btn{width:100%}' +
     '.hg-play{min-height:64px!important;font-size:24px!important}' +
     '#hg-menu-buttons{display:flex;flex-direction:column;gap:10px}' +
-    '@media (orientation:portrait){.hg-menu{flex-direction:column;justify-content:center;align-items:stretch;background:linear-gradient(180deg,rgba(8,18,12,.75),rgba(8,18,12,.35) 50%,rgba(8,18,12,.8))}.hg-menu-right{width:100%;max-width:none;min-width:0}.hg-logo{align-items:flex-start}}' +
+    '@media (orientation:portrait){#scr-menu{background:linear-gradient(180deg,rgba(8,18,12,.75),rgba(8,18,12,.3) 45%,rgba(8,18,12,.85))}.hg-menu{flex-direction:column;justify-content:center;align-items:stretch}.hg-menu-right{width:100%;max-width:none;min-width:0}.hg-logo{align-items:flex-start}}' +
     '@media (max-height:420px) and (orientation:landscape){.hg-menu-right{gap:8px}#hg-menu-buttons{gap:8px}.hg-menu-right .hg-btn{min-height:48px}.hg-play{min-height:56px!important}.hg-profile{margin-top:8px}}' +
     '.hg-wrap{max-width:1100px;margin:0 auto;padding-bottom:16px}' +
     '.hg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}' +
@@ -3547,11 +3573,19 @@
   var last = 0, fpsFrames = 0, fpsT = 0, cullT = 0, running = false;
   function frame(now) {
     requestAnimationFrame(frame);
-    var rdt = last ? Math.min(0.05, Math.max(0, (now - last) / 1000)) : 0.016;
+    var raw = last ? Math.max(0, (now - last) / 1000) : 0.016;
+    var rdt = Math.min(0.05, raw);
     last = now;
-    HG.realDt = rdt; HG.realTime += rdt;
-    fpsFrames++; fpsT += rdt;
+    fpsFrames++; fpsT += raw;
     if (fpsT >= 0.5) { HG.fps = Math.round(fpsFrames / fpsT); fpsFrames = 0; fpsT = 0; }
+    simulate(rdt);
+    // while paused behind an opaque menu, render at a reduced rate
+    if (HG.paused && (HG.frame % 3)) return;
+    render(rdt);
+  }
+  /** One simulation step (no rendering). rdt = real seconds (clamped 0.05). */
+  function simulate(rdt) {
+    HG.realDt = rdt; HG.realTime += rdt;
     HG.frame++;
     var dt = HG.paused ? 0 : rdt * HG.timeScale;
     HG.dt = dt;
@@ -3581,8 +3615,8 @@
     } catch (e) {
       console.error('[HG] frame error', e);
     }
-    // while paused behind an opaque menu, render at a reduced rate
-    if (HG.paused && (HG.frame % 3)) return;
+  }
+  function render(rdt) {
     renderer.clear();
     renderer.render(HG.scene, HG.camera);
     if (HG.state === 'hunt' && HG.viewModel.visible && HG.viewModel.children.length > 1) {
@@ -3672,6 +3706,15 @@
         weather: Object.keys(HG.weatherTypes), sounds: Object.keys(HG.sounds), shop: HG.shop.items.map(function (i) { return i.id; }) };
     },
     fps: function () { return HG.fps; },
+    /** Run the simulation synchronously for `seconds` of game time in steps of `step` (default 1/30 s), without rendering.
+     *  Lets slow headless tests advance AI/physics deterministically. Renders one frame at the end. */
+    advance: function (seconds, step) {
+      step = step || 1 / 30;
+      var n = Math.max(1, Math.round(seconds / step));
+      for (var i = 0; i < n; i++) simulate(Math.min(0.05, step));
+      render(step);
+      return n;
+    },
     /** compact state snapshot for tests */
     snapshot: function () {
       return { state: HG.state, paused: HG.paused, screen: ui.current, map: HG.mapId, animals: HG.animals.length, alive: HG.animals.filter(function (a) { return !a.dead; }).length,
@@ -3802,15 +3845,18 @@
     damage: 95, pellets: 1, spread: 0.035, fireDelay: 1.15, magSize: 5, reloadTime: 2.4, range: 320,
     zoom: 22, scope: true, projectile: 'hitscan', muzzleVelocity: 820, gravity: 5, noise: 1, recoil: 0.07,
     sound: { type: 'rifle', freq: 1 },
-    hipPos: [0.16, -0.17, -0.4], aimPos: [0, -0.012, -0.3],
+    hipPos: [0.2, -0.215, -0.5], aimPos: [0, -0.012, -0.3],
     stats: { Damage: 0.7, Range: 0.75, Stability: 0.55, 'Fire rate': 0.2 },
     buildViewModel: function () {
-      var wood = '#8a5a36', woodD = '#6b4428', metal = '#2b2e33', black = '#16181b';
+      var wood = '#9a6438', woodD = '#74482a', metal = '#3a3f46', black = '#24272c';
       var g = [
         // scope (sight line at y=0)
         M.cyl(0.021, 0.021, 0.24, 10, black, { rot: [PI / 2, 0, 0], pos: [0, 0, -0.06] }),
         M.cyl(0.03, 0.022, 0.07, 10, black, { rot: [PI / 2, 0, 0], pos: [0, 0, -0.205] }),
         M.cyl(0.026, 0.021, 0.05, 10, black, { rot: [PI / 2, 0, 0], pos: [0, 0, 0.085] }),
+        M.cyl(0.024, 0.024, 0.004, 10, '#5d8fb0', { rot: [PI / 2, 0, 0], pos: [0, 0, 0.112] }),
+        M.cyl(0.029, 0.029, 0.004, 10, '#4b7a98', { rot: [PI / 2, 0, 0], pos: [0, 0, -0.242] }),
+        M.cyl(0.0225, 0.0225, 0.012, 10, '#c9a24a', { rot: [PI / 2, 0, 0], pos: [0, 0, -0.15] }),
         M.cyl(0.012, 0.012, 0.03, 6, metal, { pos: [0, 0.022, -0.06] }),
         M.box(0.016, 0.03, 0.02, metal, { pos: [0, -0.03, -0.12] }), M.box(0.016, 0.03, 0.02, metal, { pos: [0, -0.03, 0.02] }),
         // receiver + barrel
@@ -3899,7 +3945,7 @@
       // neck + head on one pivot at the shoulders (rotation.x < 0 lowers the head)
       var head = new THREE.Group(); head.position.set(0, 1.12, -0.5);
       var hg = [
-        M.cyl(0.12, 0.18, 0.62, 6, tan, { rot: [-0.55, 0, 0], pos: [0, 0.25, -0.15] }),
+        M.cyl(0.13, 0.2, 0.6, 6, tan, { rot: [-0.6, 0, 0], pos: [0, 0.24, -0.15], jitter: 0.04 }),
         M.box(0.13, 0.2, 0.1, white, { pos: [0, 0.18, -0.26], rot: [-0.55, 0, 0] }),
         M.box(0.2, 0.21, 0.3, tan, { pos: [0, 0.52, -0.38], jitter: 0.05 }),
         M.box(0.14, 0.13, 0.2, back, { pos: [0, 0.47, -0.58] }),
@@ -3921,7 +3967,7 @@
       var legs = [];
       [[0.17, 0.92, -0.42], [-0.17, 0.92, -0.42], [0.17, 0.95, 0.48], [-0.17, 0.95, 0.48]].forEach(function (p) {
         var piv = new THREE.Group(); piv.position.set(p[0], p[1], p[2]);
-        piv.add(M.mesh(leg(null, tan, dark, p[1], 0.075, 0.035)));
+        piv.add(M.mesh(leg(null, tan, dark, p[1], 0.085, 0.04)));
         root.add(piv); legs.push(piv);
       });
       var tail = new THREE.Group(); tail.position.set(0, 1.14, 0.78);
@@ -4016,7 +4062,7 @@
   }
   function grassGeo(rng, v) {
     var c = ['#7aa045', '#8db04f', '#6b9440'][v % 3], g = [];
-    for (var i = 0; i < 5; i++) g.push(M.cone(0.05, 0.45 + rng() * 0.3, 3, c, { pos: [(rng() - 0.5) * 0.35, 0.22, (rng() - 0.5) * 0.35], rot: [(rng() - 0.5) * 0.5, 0, (rng() - 0.5) * 0.5] }));
+    for (var i = 0; i < 5; i++) g.push(M.cone(0.05, 0.45 + rng() * 0.3, 3, c, { open: true, pos: [(rng() - 0.5) * 0.35, 0.22, (rng() - 0.5) * 0.35], rot: [(rng() - 0.5) * 0.5, 0, (rng() - 0.5) * 0.5] }));
     return M.merge(g);
   }
   function flowerGeo(rng, v) {
@@ -4076,13 +4122,13 @@
       }
       ctx.addStatic(logs, { castShadow: true });
       // vegetation (instanced)
-      ctx.scatter(pineGeo, 720, { variants: 3, scale: [0.75, 1.35], density: forest, slopeMax: 0.9, collider: 0.42, colliderHeight: 9, cover: true, tag: 'tree', castShadow: true, minH: wl + 1.2 });
-      ctx.scatter(aspenGeo, 110, { scale: [0.8, 1.2], density: function (x, z) { return 1 - forest(x, z) * 0.8; }, slopeMax: 0.7, collider: 0.3, colliderHeight: 6, cover: true, tag: 'tree', castShadow: true, minH: wl + 1 });
-      ctx.scatter(bushGeo, 300, { variants: 3, scale: [0.7, 1.5], slopeMax: 0.9, collider: 0.7, colliderHeight: 1.3, cover: true, solid: false, tag: 'bush', minH: wl + 0.6 });
-      ctx.scatter(rockGeo, 130, { variants: 3, scale: [0.5, 1.9], align: true, collider: 0.9, colliderHeight: 1.2, tag: 'rock', yOffset: -0.1, castShadow: true });
-      ctx.scatter(grassGeo, 1700, { variants: 3, scale: [0.7, 1.3], slopeMax: 0.7, minH: wl + 0.5, chunk: 70, lowMult: 0.45 });
-      ctx.scatter(flowerGeo, 320, { variants: 3, scale: [0.8, 1.2], slopeMax: 0.5, minH: wl + 0.8, chunk: 70, lowMult: 0.4, density: function (x, z) { return 1 - forest(x, z); } });
-      ctx.scatter(reedGeo, 160, { scale: [0.8, 1.3], minH: wl - 0.4, maxH: wl + 0.5, allowWater: true, chunk: 70 });
+      ctx.scatter(pineGeo, 720, { variants: 3, chunk: 105, scale: [0.75, 1.35], density: forest, slopeMax: 0.9, collider: 0.42, colliderHeight: 9, cover: true, tag: 'tree', castShadow: true, minH: wl + 1.2 });
+      ctx.scatter(aspenGeo, 110, { chunk: 140, scale: [0.8, 1.2], density: function (x, z) { return 1 - forest(x, z) * 0.8; }, slopeMax: 0.7, collider: 0.3, colliderHeight: 6, cover: true, tag: 'tree', castShadow: true, minH: wl + 1 });
+      ctx.scatter(bushGeo, 300, { variants: 3, scale: [0.7, 1.5], slopeMax: 0.9, collider: 0.7, colliderHeight: 1.3, cover: true, solid: false, tag: 'bush', minH: wl + 0.6, chunk: 80, viewDist: 160 });
+      ctx.scatter(rockGeo, 130, { variants: 3, scale: [0.5, 1.9], align: true, collider: 0.9, colliderHeight: 1.2, tag: 'rock', yOffset: -0.1, castShadow: true, chunk: 105, viewDist: 200 });
+      ctx.scatter(grassGeo, 1700, { variants: 2, scale: [0.7, 1.3], slopeMax: 0.7, minH: wl + 0.5, chunk: 60, viewDist: 75, lowMult: 0.45 });
+      ctx.scatter(flowerGeo, 320, { variants: 3, scale: [0.8, 1.2], slopeMax: 0.5, minH: wl + 0.8, chunk: 60, viewDist: 70, lowMult: 0.4, density: function (x, z) { return 1 - forest(x, z); } });
+      ctx.scatter(reedGeo, 160, { scale: [0.8, 1.3], minH: wl - 0.4, maxH: wl + 0.5, allowWater: true, chunk: 60, viewDist: 90 });
     }
   };
 
