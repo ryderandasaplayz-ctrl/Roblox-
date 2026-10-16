@@ -262,10 +262,10 @@ function animWalk(m,ph,amt){var s=Math.sin(ph)*amt;
   m.legs[0].rotation.x=s;m.legs[1].rotation.x=-s;
   m.legs[0].knee.rotation.x=Math.max(0,-Math.cos(ph))*amt*1.2;m.legs[1].knee.rotation.x=Math.max(0,Math.cos(ph))*amt*1.2;
   m.arms[0].rotation.x=-s*.8;m.arms[1].rotation.x=s*.8;m.arms[0].elbow.rotation.x=-.15-amt*.4;m.arms[1].elbow.rotation.x=-.15-amt*.4;}
-for(var i=0;i<70;i++){var b=blocks[(rnd()*blocks.length)|0];peds.push({m:makePerson(),b:b,t:rnd()*4,sp:(.012+rnd()*.01)*(rnd()<.5?1:-1),ph:rnd()*6});}
+for(var i=0;i<70;i++){var b=blocks[(rnd()*blocks.length)|0];peds.push({m:makePerson(),b:b,t:rnd()*4,sp:(1.1+rnd()*.5)/(BLOCK-3)*(rnd()<.5?1:-1),ph:rnd()*6});}
 function pedPos(p,out){var t=((p.t%4)+4)%4,e=Math.floor(t),f=t-e,L=BLOCK-3,x0=p.b[0]+1.5,z0=p.b[1]+1.5;
   var pts=[[x0,z0],[x0+L,z0],[x0+L,z0+L],[x0,z0+L],[x0,z0]];out.set(pts[e][0]+(pts[e+1][0]-pts[e][0])*f,.25,pts[e][1]+(pts[e+1][1]-pts[e][1])*f);return out;}
-function updatePeds(dt){peds.forEach(function(p){var old=p.m.position.clone();p.t+=p.sp*dt*60/ (BLOCK/30);pedPos(p,p.m.position);
+function updatePeds(dt){peds.forEach(function(p){var old=p.m.position.clone();p.t+=p.sp*dt;pedPos(p,p.m.position);
   var dx=p.m.position.x-old.x,dz=p.m.position.z-old.z;if(dx||dz)p.m.rotation.y=Math.atan2(dx,dz);p.ph+=dt*6;
   animWalk(p.m,p.ph,.45);});}
 
@@ -448,6 +448,10 @@ function renderShop(){document.getElementById('shopMoney').textContent='Cash: $'
     d.appendChild(b);listEl.appendChild(d);});}
 var colorPick=0;
 function spawnOwned(t){var m=makeCar(carColors[(colorPick++)%carColors.length],false,t);m.position.set(roadPos(4)+RW/2-1.4,0,DZ+12);m.rotation.y=0;parked.push({mesh:m,v:0,h:0,mine:true});}
+// save / load (this browser only)
+try{var sv=JSON.parse(localStorage.getItem('metroCitySave')||'null');if(sv){P.money=sv.money;owned=sv.owned||owned;}}catch(e){}
+var saveT=0;function autoSave(dt){saveT+=dt;if(saveT<2)return;saveT=0;try{localStorage.setItem('metroCitySave',JSON.stringify({money:P.money,owned:owned}));}catch(e){}}
+addEventListener('pagehide',function(){saveT=9;autoSave(0);});
 function updateDealer(){nearEl.hidden=!nearDealer()||!shopEl.hidden||!!P.car;}
 
 // ---------- day/night ----------
@@ -462,7 +466,7 @@ function updateSky(dt){tod=(tod+dt*24/600)%24; // 10 min per day
 // ---------- loop ----------
 var hud=document.getElementById('hud'),last=performance.now();
 function loop(now){var dt=Math.min(.05,(now-last)/1000);last=now;clock+=dt;
-  updateSky(dt);updateTraffic(dt);updatePeds(dt);updatePlayer(dt);updateJob(dt);updatePolice(dt);updateGuns(dt);updateDealer();
+  updateSky(dt);updateTraffic(dt);updatePeds(dt);updatePlayer(dt);updateJob(dt);updatePolice(dt);updateGuns(dt);updateDealer();autoSave(dt);
   for(var k in lights){var L=lights[k];L.mx.color.setHex(LC[green('x',L.i,L.j)]);L.mz.color.setHex(LC[green('z',L.i,L.j)]);}
   if(msgT>0){msgT-=dt;if(msgT<=0)msgEl.style.opacity=0;}
   var hh=Math.floor(tod),mm=Math.floor((tod-hh)*60);
