@@ -2734,14 +2734,14 @@
     var spine = [
       { p: [0, L(0.84), L(0.67)], w: L(0.13), hUp: L(0.07), hDown: L(0.1) },
       { p: [0, L(0.83), L(0.56)], w: L(0.27), hUp: L(0.12), hDown: L(0.19), bone: 'pelvis' },
-      { p: [0, L(0.81), L(0.36)], w: L(0.3), hUp: L(0.14), hDown: L(0.19) },
-      { p: [0, L(0.79), L(0.12)], w: L(0.31), hUp: L(0.155), hDown: L(0.195), bone: 'spine' },
-      { p: [0, L(0.795), L(-0.12)], w: L(0.31), hUp: L(0.18), hDown: L(0.235) },
-      { p: [0, L(0.81), L(-0.3)], w: L(0.29), hUp: L(0.19), hDown: L(0.245), bone: 'chest' },
-      { p: [0, L(0.85), L(-0.44)], w: L(0.23), hUp: L(0.15), hDown: L(0.22) },
-      { p: [0, L(0.95), L(-0.54)], w: L(buck ? 0.18 : 0.155), hUp: L(0.1), hDown: L(0.15), bone: 'neck1' },
-      { p: [0, L(1.08), L(-0.62)], w: L(buck ? 0.145 : 0.12), hUp: L(0.075), hDown: L(0.105) },
-      { p: [0, L(1.2), L(-0.7)], w: L(buck ? 0.125 : 0.105), hUp: L(0.065), hDown: L(0.085), bone: 'neck2' },
+      { p: [0, L(0.815), L(0.36)], w: L(0.32), hUp: L(0.145), hDown: L(0.2) },
+      { p: [0, L(0.8), L(0.12)], w: L(0.34), hUp: L(0.16), hDown: L(0.215), bone: 'spine' },
+      { p: [0, L(0.805), L(-0.12)], w: L(0.34), hUp: L(0.185), hDown: L(0.26) },
+      { p: [0, L(0.82), L(-0.3)], w: L(0.31), hUp: L(0.195), hDown: L(0.265), bone: 'chest' },
+      { p: [0, L(0.86), L(-0.44)], w: L(0.25), hUp: L(0.16), hDown: L(0.23) },
+      { p: [0, L(0.96), L(-0.55)], w: L(buck ? 0.2 : 0.165), hUp: L(0.11), hDown: L(buck ? 0.18 : 0.155), bone: 'neck1' },
+      { p: [0, L(1.08), L(-0.63)], w: L(buck ? 0.16 : 0.125), hUp: L(0.08), hDown: L(buck ? 0.125 : 0.105) },
+      { p: [0, L(1.2), L(-0.7)], w: L(buck ? 0.135 : 0.108), hUp: L(0.068), hDown: L(buck ? 0.095 : 0.085), bone: 'neck2' },
       { p: [0, L(1.3), L(-0.76)], w: L(0.11), hUp: L(0.06), hDown: L(0.072) },
       { p: poll, w: L(0.1), hUp: L(0.055), hDown: L(0.06) }
     ];
@@ -2757,19 +2757,19 @@
     ];
     var FR = [
       { p: [L(0.1), L(0.86), L(-0.34)], r: L(0.06) },
-      { p: [L(0.115), L(0.72), L(-0.4)], rx: L(0.062), rz: L(0.085) },
-      { p: [L(0.112), L(0.55), L(-0.34)], rx: L(0.045), rz: L(0.055) },
-      { p: [L(0.1), L(0.3), L(-0.355)], rx: L(0.026), rz: L(0.034) },
+      { p: [L(0.12), L(0.72), L(-0.4)], rx: L(0.07), rz: L(0.1) },
+      { p: [L(0.115), L(0.55), L(-0.35)], rx: L(0.05), rz: L(0.064) },
+      { p: [L(0.104), L(0.3), L(-0.36)], rx: L(0.028), rz: L(0.036) },
       { p: [L(0.1), L(0.085), L(-0.37)], rx: L(0.02), rz: L(0.025) },
       { p: [L(0.1), L(0.02), L(-0.395)], rx: L(0.019), rz: L(0.024) }
     ];
     var BR = [
       { p: [L(0.09), L(0.86), L(0.48)], r: L(0.08) },
-      { p: [L(0.115), L(0.76), L(0.47)], rx: L(0.085), rz: L(0.125) },
-      { p: [L(0.12), L(0.55), L(0.33)], rx: L(0.06), rz: L(0.085) },
-      { p: [L(0.1), L(0.38), L(0.5)], rx: L(0.03), rz: L(0.048) },
-      { p: [L(0.1), L(0.095), L(0.45)], rx: L(0.02), rz: L(0.026) },
-      { p: [L(0.1), L(0.02), L(0.425)], rx: L(0.019), rz: L(0.024) }
+      { p: [L(0.12), L(0.76), L(0.46)], rx: L(0.095), rz: L(0.14) },
+      { p: [L(0.125), L(0.6), L(0.37)], rx: L(0.07), rz: L(0.1) },
+      { p: [L(0.105), L(0.44), L(0.5)], rx: L(0.03), rz: L(0.05) },
+      { p: [L(0.1), L(0.1), L(0.47)], rx: L(0.021), rz: L(0.028) },
+      { p: [L(0.1), L(0.02), L(0.445)], rx: L(0.019), rz: L(0.024) }
     ];
     var COAT = buck ? '#86684b' : '#8f7255', BACK = buck ? '#62492f' : '#6d5439', LEGC = '#9c7f60', WHITE = '#f1ece3', NOSE = '#161212', FACE = buck ? '#59432f' : '#6d543c';
     var A = new THREE.Color(), B = new THREE.Color();
@@ -2799,7 +2799,7 @@
         var front = part === 'legF';
         A.lerp(B.set(LEGC), U.smooth(L(0.5), L(0.3), y) * 0.8);
         A.lerp(B.set(WHITE), U.smooth(0.2, 0.8, -nx * (x > 0 ? 1 : -1)) * U.smooth(L(0.7), L(0.45), y) * 0.65);
-        if (!front) A.lerp(B.set('#4a3626'), U.smooth(0.03, 0.0, Math.abs(y - L(0.37))) * U.smooth(0.3, 0.8, nz) * 0.6);
+        if (!front) A.lerp(B.set('#4a3626'), U.smooth(0.03, 0.0, Math.abs(y - L(0.43))) * U.smooth(0.3, 0.8, nz) * 0.6);
         A.lerp(B.set('#3a2b20'), U.smooth(L(0.14), L(0.05), y) * 0.55);
       }
       return c.copy(A);
@@ -2818,7 +2818,7 @@
       attach: buck ? function () {
         var out = [], base = [L(0.042), poll[1] + L(0.062), poll[2] + L(0.03)];
         [2, 3, 4].forEach(function (tines) {
-          var s = 0.85 + tines * 0.08, geos = [];
+          var s = 1.05 + tines * 0.1, geos = [];
           [1, -1].forEach(function (sd) {
             var b = [base[0] * sd, base[1], base[2]];
             function P(x, y, z) { return [b[0] + sd * x * s, b[1] + y * s, b[2] + z * s]; }
@@ -2868,7 +2868,7 @@
         BR: [{ p: [0.045, 0.14, 0.09], r: 0.04 }, { p: [0.058, 0.12, 0.07], rx: 0.042, rz: 0.055 }, { p: [0.066, 0.06, 0.01], rx: 0.03, rz: 0.035 }, { p: [0.062, 0.022, 0.1], rx: 0.016, rz: 0.02 }, { p: [0.058, 0.012, 0.02], rx: 0.015, rz: 0.012 }, { p: [0.056, 0.01, -0.035], rx: 0.013, rz: 0.01 }]
       },
       feet: false,
-      ears: { p: [0.022, poll[1] + 0.03, poll[2] + 0.012], len: 0.085, width: 0.038, cup: 0.55, tip: 0.1, rot: [0.25, 0.15, -0.2] },
+      ears: { p: [0.022, poll[1] + 0.03, poll[2] + 0.012], len: 0.1, width: 0.038, cup: 0.55, tip: 0.1, rot: [0.25, 0.15, -0.2] },
       tail: { p: [0, 0.135, 0.14], len: 0.06, w: 0.06, h: 0.055, droop: -0.4, bushy: true },
       eyes: { p: [0.031, poll[1] + hd.y * 0.035 + 0.012, poll[2] + hd.z * 0.035], r: 0.0105, rot: 0.6, color: '#0e0906' },
       nose: { p: [0, poll[1] + hd.y * 0.098 - 0.002, poll[2] + hd.z * 0.098], r: 0.008, color: '#c99a95', sx: 1.1, sy: 0.7, sz: 0.6 },
@@ -4261,6 +4261,9 @@
     for (var i = 0; i < scatterChunks.length; i++) {
       var c = scatterChunks[i], dc = U.dist2D(cx, cz, c.cx, c.cz), d = dc - c.r;
       var vis = d < (c.view ? Math.min(far, c.view) : far);
+      // shadow pass: only chunks overlapping the player-following shadow box cast (saves ~100 draw calls on High)
+      if (c.shadow == null) c.shadow = c.mesh.castShadow;
+      if (c.shadow) { var cs = d < G.shadowExtent * 1.75; c.mesh.castShadow = cs; if (c.lo) c.lo.castShadow = cs; }
       if (!c.lo) { c.mesh.visible = vis; continue; }
       if (!vis) { c.mesh.visible = c.lo.visible = false; continue; }
       var st = dc + c.r < c.lodDist ? 'near' : (d > c.lodDist ? 'far' : 'mixed');

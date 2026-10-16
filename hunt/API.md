@@ -165,7 +165,7 @@ HG.save = {
   trophies: [{ species, name, weight, score, zone, distance, weapon, map, date, legendary }],
   stats: { hunts, kills, shots, hits, headshots, heartShots, longestShot, heaviest, bySpecies: { id: { kills, bestScore, bestWeight } },
            distanceWalked, playTime, cashEarned, timesDowned, legendaryKills },
-  settings: { sens: 1, invertY: false, graphics: 'low'|'high', sound: true, music: true, aimAssist: <touch device>, fov: 70, showFps: false, vibrate: true },
+  settings: { sens: 1, invertY: false, graphics: 'low'|'high'|'ultra', sound: true, music: true, aimAssist: <touch device>, fov: 70, showFps: false, vibrate: true },
   unlockedMaps: ['pine_valley'],
   created, lastPlayed
   // + feature namespaces, e.g. progression: {...}, gear: {...}
@@ -193,12 +193,13 @@ HG.save = {
 | `HG.viewScene`, `HG.viewCamera`, `HG.viewModel` | First-person weapon pass. `HG.viewModel` (Group) lives in `HG.viewScene` and renders after a depth clear, so it never clips into terrain. `viewCamera` sits at the origin looking -Z (FOV 58 in landscape, 80 in portrait). `HG.viewLights = {hemi, sun}` follow the environment |
 | `HG.mapRoot` | Group holding the current map. Anything you add here is **disposed on map unload** |
 | `HG.animalRoot` | Group holding animal roots |
-| `HG.quality` | `{ low: bool }` (graphics setting) |
+| `HG.quality` | `{ level: 'low'|'high'|'ultra', low, high, ultra }` (graphics setting, see [6b](#6b-hggfx-rendering-and-model-toolkit)) |
 | `HG.portrait` | true when height > width |
 | `HG.tmp` | `{v1..v6: Vector3, q1, q2: Quaternion, m1: Matrix4, e1: Euler, c1, c2: Color, ray: Ray, box: Box3, sphere: Sphere}`. Scratch objects for **feature** code. Use them only within one synchronous function and never keep references. Core uses private temporaries |
 
 Materials:
-- `HG.vcMat`: shared `MeshLambertMaterial({vertexColors:true})`. Use it for anything built with `HG.model`.
+- New content: use `HG.gfx.mat` and the HG.gfx builders ([6b](#6b-hggfx-rendering-and-model-toolkit)). The helpers below are legacy and low-poly.
+- `HG.vcMat`: shared vertex-colour material (Standard on High/Ultra, Lambert on Low). Use it for anything built with `HG.model`.
 - `HG.mat(color, opts?)`: cached shared `MeshLambertMaterial`. `opts` may contain `emissive`, `transparent`, `opacity`, `side`, or `basic:true` for `MeshBasicMaterial`.
 - Shared materials and geometries have `userData.shared = true` and are **never disposed** by `HG.disposeObject` or map unload. Set `geometry.userData.shared = true` on geometries you cache and reuse across instances.
 
@@ -219,6 +220,111 @@ M.arms({right:[x,y,z], left:[x,y,z]}) -> [geo...]  // first-person arms using HG
 - `HG.disposeObject(obj)` removes it from its parent and disposes non-shared geometries and materials.
 - `HG.flora = {pine, aspen, bush, rock, grass, flower, reed}`: core vegetation factories `(rng, variant) -> prepared geometry`, reusable in `ctx.scatter`.
 - `HG.makeLeg(null, color, hoofColor, length, rTop, rBottom)` returns `[geo...]` for a leg hanging down from a hip pivot (y = 0 → -length).
+
+## 6b. HG.gfx: rendering and model toolkit
+
+**Quality bar.** Every new model must read as the real thing: correct anatomy and proportions, smooth silhouettes, believable materials. Build with `HG.gfx`; do not use `HG.model` boxes for new content (it remains for legacy and tiny props). Study `deerSpec`/`rabbitSpec` (`HG.gfx.deerSpec(buck)`, `HG.gfx.rabbitSpec()`) and the `hunting_rifle` view model in core.js before you build anything.
+
+`var G = HG.gfx, TX = HG.gfx.tex;`
+
+### Renderer, lighting, quality
+- `renderer.outputEncoding = sRGBEncoding`, ACES Filmic tone mapping (`G.exposure`, about 0.8, multiplied by the time of day). Colour textures made by `TX.*` are already sRGB. **All colours you pass to `HG.gfx` are sRGB CSS/hex strings.** `G.color(css)` returns a NEW linear `THREE.Color`.
+- `HG.quality = {level: 'low'|'high'|'ultra', low, high, ultra}`. `G.level()`, `G.isLow()`. The first run auto-picks Low on small touch screens or devices reporting 3 GB or less of memory, and the choice persists in settings. High: MeshStandardMaterial + sky IBL, one soft PCF sun shadow that follows the player, normal maps. Ultra (desktop): 2048 shadow map, denser grass, longer view. Low: Lambert/Phong, no shadows, LOD distances x0.7, about 60% scatter, pixel ratio 1. Listen for `HG.on('settings', ...)`. Materials from `G.mat` are rebuilt per level automatically.
+- Lights: `G.sun` (DirectionalLight), `G.hemi` (HemisphereLight). `HG.env.apply` drives them from `HG.env.hour`. `G.shadowExtent` (m) is the half-size of the shadow box. Only scatter chunks within about 1.75x this distance cast shadows.
+- `G.sky = {mesh, material, uniforms, params}`: shader dome with an atmospheric gradient, sun disc and glow, drifting fbm clouds, stars and moon at night. Tune `params` per map or weather (applied every env update): `cloudCover 0..1, cloudScale, cloudSpeed, cloudSharp, haze 0..1, glow, starBrightness, tint ('#rrggbb'|null), tintAmount 0..1`. Fog colour follows the sky horizon automatically.
+```js
+// worlds.js: overcast swamp
+HG.gfx.sky.params.cloudCover = 0.85; HG.gfx.sky.params.haze = 0.8; HG.gfx.sky.params.tint = '#9fb39a'; HG.gfx.sky.params.tintAmount = 0.25;
+```
+
+### Materials
+`G.mat(opts)` returns a **cached shared** material (never dispose it). It is Standard on High/Ultra and Lambert on Low (Phong when `metalness > 0.5` or `roughness < 0.3`).
+`opts: {color, map, normalMap, normalScale, roughness (0.8), metalness (0), vertexColors, skinning, side, alphaTest, transparent, opacity, depthWrite, emissive, emissiveIntensity, envMapIntensity, flat, fog, wind:{amp, fade}, key}`. Give a stable `key` when the options contain textures.
+Suggested values: fur 0.85-0.9 roughness; antler/horn 0.55; oiled wood 0.42; blued steel `{roughness: 0.32, metalness: 0.88}`; parkerized `{0.6, 0.7}`; leather 0.65; lens `{color: '#1d3340', roughness: 0.04, metalness: 0.95}`.
+
+### Textures (`HG.gfx.tex`, all cached by their options; sRGB CanvasTextures with RepeatWrapping)
+| Call | Use |
+|---|---|
+| `TX.fur({base, back, belly, strokes, length:[a,b], alpha, mottle, spots:{count,size,color}, stripes:{count,width,color}, size, seed})` | coloured fur: countershaded (back at u edges, belly at u=0.5), directional strands along v |
+| `TX.furDetail({strokes, length, alpha, seed})` | neutral (about white) fur detail. **Preferred**: tint it with vertex colours (`coat()` painting) so one texture serves every species |
+| `TX.feathers({base, tip, edge, barred, iridescent:[c1,c2], size, rows, seed})` | plumage tile (turkey bronze: `iridescent:['#3f6b4a','#8a4a2a']`) |
+| `TX.feather({base, tip, bands, bandColor, shaft, width, seed})` | one feather on an alpha card (for `G.wing` / `G.fan`) |
+| `TX.scales({base, dark, light, rows, cols, scutes, size, seed})` | reptile scales; `scutes:true` gives armoured gator scutes |
+| `TX.bark({style:'pine'|'oak'|'birch'|'dead'|'plate'|'smooth', base, dark, light, moss, size:[w,h], seed})` | tree bark |
+| `TX.woodGrain({base, dark, light, figure 0..1, rings, size, seed, checker:[{x,y,w,h}]})` | gun stocks (grain along +v); `checker` adds checkering in normalised rects |
+| `TX.metal('blued'|'parkerized'|'brushed'|'stainless'|'black')` or `TX.metal({type, size, seed})` | gun metal |
+| `TX.leather({base, dark, stitch, seed})`, `TX.fabric({base, seed})` | slings, holsters, gloves, clothes |
+| `TX.camo({pattern:'woodland'|'leafy'|'digital'|'blaze'|'marsh'|'snow', palette:[4 colours], seed})` | outfits, blinds, ATV |
+| `TX.noise({size, period, octaves, seed})`, `TX.antler()`, `TX.rock()`, `TX.planks()`, `TX.shingles()`, `TX.stone()` | misc |
+| `TX.normalOf(tex, strength)` | matching tangent-space normal map (use only when `!G.isLow()`) |
+| `G.texture(key, w, h, draw(ctx, w, h, rng), {srgb, repeat, clamp})` | your own cached canvas texture |
+
+### Geometry builders (indexed BufferGeometry with position/normal/uv; paint them afterwards)
+```js
+// spine of ellipsoid sections -> one smooth skin (Catmull-Rom between sections)
+G.organicBody([{p:[0,0.8,0.6], w:0.3, hUp:0.14, hDown:0.2, sq:2.2}, ...], {radial:28, steps:4, smooth:2, density:2.5, capBulge:0.4})
+G.loft(sections, opts)              // general: {p, rx, ry | ryUp/ryDown, sq, n} sections; opts {radial, steps, frame:'up'|'transport', linear, capStart, capEnd, density, displace(fn)}
+G.taperedLimb([{p, r | rx, rz}...], {radial:12, steps:4, n:[0,0,-1]})   // rx = side radius, rz = front/back
+G.tube(points, radius | [radii] | fn(t), opts)   // pipes, barrels, logs, slings
+G.antler({base, beam:[[x,y,z]...], r:[r0, rTip], tines:[{t, dir, len, r, bend}], palm:{t0, t1, width, thick, points, pointLen}, burr:true, seg, radial}, side)  // side -1 mirrors to the left
+G.horn({base, dir, axis, len, r0, r1, curl, twist, ridges, ridgeDepth, seg, radial}, side)   // ram curls, bison hooks, pronghorn
+G.hoof({w, l, h, cloven:true})      G.paw({size, toes:4, claw:0.4})
+G.ear({len, width, cup, thick, tip})        // uv.x 0 = back face, 1 = inner face
+G.tail({len, w, h, droop, tipR, bushy})     G.beak({len, w, h, hook, flat})
+G.wing({span, chord, primaries:9, secondaries:8}, side)   G.fan({radius, feathers:16, spread, width})   // use TX.feather + alphaTest
+G.merge([geo, ...])                 // own mergeGeometries (indexed or not, fills missing attributes)
+G.xform(geo, pos, rot, scale)  G.mirrorX(geo)  G.ensureColor(geo)  G.tint(geo, '#hex')
+G.paint(geo, function (c, x, y, z, nx, ny, nz, u, v, i) { c.set(...); }, {multiply, gain})   // vertex colour painting (markings, countershading)
+G.vertexAO(geo, {occluders:[[x,y,z,r]...]|'auto', cells, strength, ground:y, groundStrength, groundFalloff, under, min})       // creases, belly, under-ear darkening
+```
+
+### LOD
+- `G.makeLOD(highFn, lowFn, dist)` returns a `THREE.LOD`.
+- `G.lodSwap(mesh, [geoHi, geoLo, ...], [0, d1, ...])` swaps the geometry on ONE mesh (works for SkinnedMesh/InstancedMesh). Core updates it about 5 times per second.
+
+### Rigs, gaits, quadrupeds
+`G.quadruped(spec)` builds and caches a **skinned template** (high and low LOD geometry, rig, attachments). `G.spawnQuadruped(tpl, {tint, variant})` returns `parts` that you return directly from `buildMesh`. Core then calls `parts.animate(a, dt)` every frame and `parts.die(a, dt)` after a kill (a natural stumble and collapse, no gore).
+```js
+// spec (model space: +y up, head toward -z, ground at y = 0; see deerSpec for a complete example)
+{ key: 'elk_bull',
+  spine: [ {p, w, hUp, hDown, sq, bone:'pelvis'|'spine'|'chest'|'neck1'|'neck2'} ... last = poll (head joint) ],   // tail end first, head end last
+  head:  [ ellipsoid sections from poll to nose ],
+  legs:  { FR: [6 joints {p, r|rx,rz}: body-root, hip/shoulder, knee/elbow, hock/carpus, fetlock, hoof], BR: [...] },  // left side is mirrored
+  hoof: {w, l, h} | paw: {size} | feet: false,
+  ears: {p, len, width, cup, tip, rot}, tail: {p, len, w, h, droop, bushy},
+  eyes: {p, r, rot, color}, nose: {p, r, color, sx, sy, sz},
+  coat: function (c, x, y, z, nx, ny, nz, part, u, v) { /* part: body|head|legF|legH|ear|tail|hoof|paw -> c.set(sRGB) */ },
+  fur: {strokes, length, alpha, seed}, roughness: 0.86, density: 2.6,
+  gaits: ['walk', 'trot', 'gallop'], speeds: [walk->trot, trot->gallop] (m/s),
+  poses: {idle, walk, run, alert, graze: [neck1, neck2, head] pitch radians},
+  tailLift, tailFlag (0..1), earFwd, flexF, flexH, swingF, swingH, strideMul, lodDist, ao,
+  attach: function (spec) { return [{bone: 'head', geometry /* model space */, material, lowGeometry, variant}]; } }   // antlers, horns, tusks, bell, mane
+```
+- Bones: `root > pelvis > spine > chest > neck1 > neck2 > head (earR, earL)`; legs `FL|FR|BL|BR` `_hip > _knee > _hock > _hoof`; `tail1 > tail2`. `parts.rig.bones[name]` lets you add extra motion (a jaw, a bugle).
+- Gaits (`G.gaits`): `walk` (4-beat lateral), `trot` (diagonal), `gallop` (rotary, spine flex), `bound` (deer pronk, rabbits), `hop` (lagomorph), `waddle` (ducks, bears' roll), `fly`. The animator blends three gaits by speed and adds head bob and nod, idle breathing, look-around, ear flicks, tail swish and flag (whitetail), graze/alert poses and slope alignment. Birds and other non-quadrupeds can use `G.rig.build`, `G.skin.chain/rigid/fn`, `G.rig.skinnedMesh` and `G.legPose` directly, or rigid pivots with the classic `parts` contract (see §12).
+```js
+HG.animalTypes.mule_deer = { /* ...stats... */
+  buildMesh: function (opts) {
+    var spec = HG.gfx.deerSpec(true); spec.key = 'mule_deer'; spec.ears.len *= 1.5;  // derive from an existing spec
+    return HG.gfx.spawnQuadruped(HG.gfx.quadruped(spec), { variant: 4 });
+  } };
+```
+
+### First-person hands
+`G.fpArms({right: {pos, basis:[[xAxis],[yAxis]] | rot, pose, arm:[dx,dy,dz], armLen}, left: {...}})` returns a Group of gloved hands and sleeves in weapon space. Poses (`G.handPoses`): `'trigger'`, `'support'`, `'grip'`, `'fist'`, `'open'`, `'pinch'`, or `{curl:[i,m,r,p], thumb, spread, index:[mcp,pip,dip]}`. The glove/sleeve colours come from `HG.getOutfitColors()` (`{sleeve, cuff, glove, pattern, palette}`; gear.js may replace it). `arms.userData.left/right` are the hand groups, so you can animate reloads. `G.handGeometry(pose)` and `G.sleeveGeometry` are the lower-level builders.
+View-model pattern (see `hunting_rifle`): build parts once per quality into a cache, use one Mesh per material, add `G.fpArms`, set `grp.userData.muzzle`, and animate bolts, levers, slides, hammers, bow strings and limbs in `grp.userData.animate(w, dt)` using `w.lastShot`, `w.reloading`, `w.reloadT / w.reloadDur`.
+
+### Environment builders
+- `G.terrainMaterial(palette)`: slope- and height-blended grass/dirt/rock/extra layers with world-space UVs and macro noise. Palettes: `'meadow'|'snow'|'sand'|'mud'|'autumn'` or `{base, grass:[...], dirt, rock, extra, grassKind, extraKind:'sand'|'snow'|'mud'|'grass', scale:[m per tile x4], rules:{slopeDirt:[a,b], slopeRock:[a,b], shore, extraMode:'shore'|'high'|'low'|'noise'|'none', extraLevel, rockLevel, dirtNoise, grassGrow}, tint:[base, alt], weights: fn(x,z,h,slope,wl,out4), mode:'albedo'|'tint'}`. Maps select it with `map.terrain = <palette>` (otherwise it is derived from `map.groundColors`; core builds the `tw` weights attribute; `G.terrainWeights` is exposed).
+- `G.waterMaterial({shallow, deep, opacity, ripple, speed, foam})`: fresnel sky reflection, animated ripples, sun glint, depth tint and shore foam. It needs a `depth` vertex attribute; core water planes have one.
+- `G.trees.pine({height, seed, spread, whorls})`, `.oak({height, seed})`, `.birch({height, seed})`, `.dead({height, seed})`, `.bush({size, seed, berries})`, `.log({len, r, seed, stump})`, `G.plant('grass'|'fern'|'flowers'|'reeds'|'dry', {size, seed})`, `G.rock({size, seed, flat, stretch, moss, mossAmount})` all return `{geometry, material, lod:{geometry, dist}, castShadow}`. **Return them straight from a `ctx.scatter` factory**, which instances and LODs them per chunk with wind sway. They are cached, so create variants once outside the factory. Materials: `G.vegMaterial('tree'|'grass'|'plant')`, `G.rockMaterial()`.
+- Grass: near-player instanced wind grass is automatic when `map.grass !== false`. Its density follows quality and its colour follows the terrain.
+- `G.buildCabin(ctx, x, z, rotY)`, `G.nightGlow` (cabin window) are landmark helpers.
+- Wind: `G.windUniforms` (shared), `G.applyWind(material, {amp, fade, flutter})` patches a material you own (not a shared `G.mat`) to sway.
+
+### Budget and rules
+- High: up to about 250 draw calls and about 600k triangles on screen. Measure with `HG.debug.renderInfo()`. Merge static props per material (`G.merge`), instance anything repeated (`ctx.scatter`), and give every animal a low LOD (the quadruped builder does this for you).
+- Never create materials or textures per instance or per frame: everything from `G.mat`/`TX` is cached and shared (`userData.shared`). Cache your own geometries in closures and mark them `userData.shared = true`.
 
 ## 7. Player
 
@@ -527,7 +633,7 @@ The core shop screen (`'shop'`) rebuilds on every open: header, wallet, tabs for
 
 ## 17. Settings
 
-`HG.settingsDefs` rows: `{key, label, type: 'toggle'|'range'|'choice', min, max, step, options: [[value, label]], default, onChange(v)}`. `HG.addSetting(def)` adds or replaces a row. `HG.setSetting(key, value)` applies side effects (sound, music, graphics, FPS), stores and emits `'settings'`. `HG.openSettings(from = 'menu'|'pause')`. Core keys: `sens, invertY, fov, graphics ('low'|'high'), aimAssist, sound, music, vibrate, showFps`. `HG.applyGraphics()` re-applies pixel ratio and shadows.
+`HG.settingsDefs` rows: `{key, label, type: 'toggle'|'range'|'choice', min, max, step, options: [[value, label]], default, onChange(v)}`. `HG.addSetting(def)` adds or replaces a row. `HG.setSetting(key, value)` applies side effects (sound, music, graphics, FPS), stores and emits `'settings'`. `HG.openSettings(from = 'menu'|'pause')`. Core keys: `sens, invertY, fov, graphics ('low'|'high'|'ultra'), aimAssist, sound, music, vibrate, showFps`. `HG.applyGraphics()` re-applies pixel ratio and shadows.
 
 ## 18. Audio
 
@@ -574,7 +680,7 @@ Use `#debug` in the URL to set `HG.debugEnabled` (also shows the FPS counter). H
 | Kind | Ids |
 |---|---|
 | Map | `pine_valley` (420 m, hills, lake at (60,-45), spawn (0,150) facing north, cabin landmark at (16,162)) |
-| Animals | `whitetail_deer` (common, skittish, herds 1-4, 45-110 kg, bucks have antlers), `rabbit` (common, hops, 1.1-2.4 kg) |
+| Animals | `whitetail_deer` (common, skittish, herds 1-4, 45-110 kg; skinned HG.gfx quadruped, buck with 2-4 tine antlers or doe via `opts.buck/doe`), `rabbit` (cottontail, common, hops, 1.1-2.4 kg) |
 | Weapon | `hunting_rifle` (bolt-action, 4x scope, mag 5, hitscan with mild drop) |
 | Ammo | `rifle_ammo` (.308, pack 10, $40) |
 | Shop items | `hunting_rifle`, `rifle_ammo` (×10), `rifle_ammo_x3` (×30), `gold_exchange` (5 gold → $750, upgrades) |

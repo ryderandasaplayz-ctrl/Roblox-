@@ -135,7 +135,7 @@ TP.palette = {
 TP.tires = {
   dot:    { name: 'DOT street tires', mu: 0.82, idealSlip: 0.9, fall: 1.3, floor: 0.62, hopGain: 1.0 },
   bigrig: { name: 'Steer & drive tires', mu: 0.80, idealSlip: 0.8, fall: 1.25, floor: 0.6, hopGain: 1.1 },
-  ag:     { name: 'Ag bar tires', mu: 0.94, idealSlip: 1.0, fall: 1.35, floor: 0.64, hopGain: 1.0 },
+  ag:     { name: 'Ag bar tires', mu: 0.94, idealSlip: 1.0, fall: 1.3, floor: 0.6, hopGain: 1.35 },
   cut:    { name: 'Cut pulling tires', mu: 1.06, idealSlip: 1.25, fall: 1.45, floor: 0.66, hopGain: 1.15 }
 };
 
@@ -1300,6 +1300,7 @@ LP.canvasTexture = function (w, h, draw, o) {
   if (o.repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(o.repeat[0], o.repeat[1]); }
   t.anisotropy = o.anisotropy || 4;
   if (o.nearest) t.magFilter = THREE.NearestFilter;
+  if (!t.userData) t.userData = {};
   t.userData.canvas = cv; t.userData.ctx = ctx;
   return t;
 };
@@ -1359,6 +1360,7 @@ LP.liveryTexture = function (lv, o) {
     var acc = lv.accent || '#ffd23f', trim = lv.trim || '#17140f', pat = lv.pattern || 'stripe';
     if (o.fill) { c.fillStyle = lv.base || '#c8342b'; c.fillRect(0, 0, w, h); }
     c.save();
+    if (o.mirror) { c.translate(w, 0); c.scale(-1, 1); }
     if (pat === 'stripe') {
       c.fillStyle = acc; c.fillRect(0, h * 0.52, w, h * 0.16);
       c.fillStyle = trim; c.fillRect(0, h * 0.7, w, h * 0.05);
@@ -1391,11 +1393,13 @@ LP.liveryTexture = function (lv, o) {
       c.font = '800 ' + Math.round(h * 0.2) + 'px "Saira Condensed", "Arial Narrow", Impact, sans-serif';
       c.textAlign = 'left'; c.textBaseline = 'middle';
       c.fillStyle = trim === '#17140f' && pat !== 'twoTone' ? acc : trim;
-      c.fillText(String(lv.brandText || o.brand).toUpperCase(), w * 0.05, h * 0.3);
+      if (o.mirror) { c.textAlign = 'right'; c.fillText(String(lv.brandText || o.brand).toUpperCase(), w * 0.95, h * 0.3); }
+      else c.fillText(String(lv.brandText || o.brand).toUpperCase(), w * 0.05, h * 0.3);
     }
     // number roundel
     if (lv.number != null && lv.number !== '' && o.number !== false) {
       var r = h * 0.3, nx = o.numberX != null ? o.numberX * w : w * 0.62, ny = h * 0.36;
+      if (o.mirror) nx = w - nx;
       c.fillStyle = lv.numberBg || '#f3efe6'; c.beginPath(); c.arc(nx, ny, r, 0, Math.PI * 2); c.fill();
       c.lineWidth = h * 0.03; c.strokeStyle = trim; c.stroke();
       c.font = '900 ' + Math.round(r * (String(lv.number).length > 2 ? 0.95 : 1.35)) + 'px "Saira Condensed", "Arial Narrow", Impact, sans-serif';
@@ -1600,7 +1604,7 @@ function fxTexture(kind) {
   });
 }
 var FX_TYPES = {
-  smoke:    { max: 650, tex: 'puff', blend: 'normal', life: [1.6, 3.0], size: [0.9, 4.2], c0: 0x1a1714, c1: 0x5a5550, alpha: 0.75, drag: 1.1, gravity: -0.9, spin: 0.6 },
+  smoke:    { max: 650, tex: 'puff', blend: 'normal', life: [1.4, 2.8], size: [0.7, 3.4], c0: 0x1a1714, c1: 0x5a5550, alpha: 0.68, drag: 1.1, gravity: -0.9, spin: 0.6 },
   steam:    { max: 160, tex: 'puff', blend: 'normal', life: [0.8, 1.6], size: [0.6, 2.4], c0: 0xffffff, c1: 0xd8d8d8, alpha: 0.45, drag: 1.4, gravity: -0.6, spin: 0.5 },
   dust:     { max: 420, tex: 'puff', blend: 'normal', life: [1.2, 2.6], size: [0.8, 3.6], c0: 0xa9825a, c1: 0xc9ab85, alpha: 0.55, drag: 1.6, gravity: -0.15, spin: 0.4 },
   dirt:     { max: 700, tex: 'chunk', blend: 'normal', life: [0.6, 1.3], size: [0.16, 0.12], c0: 0x5e3b1f, c1: 0x7a5230, alpha: 1, drag: 0.25, gravity: 9.8, spin: 6 },
@@ -1888,7 +1892,7 @@ IN.kbThrottle = 0;
 function pollInput(dt) {
   var k = IN.keys;
   var up = k.KeyW || k.ArrowUp, dn = k.KeyS || k.ArrowDown;
-  if (up) IN.kbThrottle = Math.min(1, IN.kbThrottle + dt * 1.5);
+  if (up) IN.kbThrottle = Math.min(1, IN.kbThrottle + dt * 3.2);
   else IN.kbThrottle = Math.max(0, IN.kbThrottle - dt * (dn ? 4 : 2.4));
   IN.throttle = Math.max(IN.kbThrottle, IN.pedal);
   var l = k.KeyA || k.ArrowLeft || IN.steerL, r = k.KeyD || k.ArrowRight || IN.steerR;
@@ -1952,5 +1956,1845 @@ function bindInput() {
   IN.enabled = true;
 }
 
-/*__PART_E__*/
+
+/* ---------------------------------------------------------------------------
+ * 15. MODELS  TP.models — base low-poly vehicles + the weight-transfer sled.
+ *   Vehicle convention: root origin on the ground under the REAR axle, facing +X,
+ *   +Z = driver's right. build() returns {root, wheels:{front,rear}, stacks, hitch,
+ *   body, frontEnd, radius:{front,rear}}. Wheels are Object3Ds whose rotation.z the
+ *   renderer spins (rolling forward = negative z rotation).
+ * ------------------------------------------------------------------------- */
+var MD = TP.models = {};
+function hexNum(c, d) { if (typeof c === 'number') return c; if (!c) return d; try { return new THREE.Color(c).getHex(); } catch (e) { return d; } }
+MD.hex = hexNum;
+/** Shade a hex color: f < 1 darker, > 1 lighter. */
+MD.shade = function (c, f) { var col = new THREE.Color(hexNum(c, 0x888888)); if (f < 1) col.multiplyScalar(f); else col.lerp(new THREE.Color(1, 1, 1), f - 1); return col.getHex(); };
+/** A wheel pivot group with a lugged tire. side = -1 (left, -Z) | 1 (right). Returns the pivot (spin it on Z). */
+MD.wheel = function (radius, width, o) {
+  o = o || {};
+  var piv = new THREE.Group();
+  var m = LP.mesh(LP.tire(radius, width, o), { shadow: true });
+  piv.add(m);
+  piv.userData.radius = radius;
+  return piv;
+};
+/** Vertical exhaust stack with a bevel-cut tip. Returns {geo, tip:Object3D(position at the outlet)}. */
+MD.stack = function (parent, x, y, z, h, r, color, o) {
+  o = o || {};
+  var b = LP.builder();
+  b.cyl(r, r, h, 8, color, { y: h / 2 });
+  b.cyl(r * 1.25, r * 1.25, h * 0.08, 8, color, { y: h * 0.12 });
+  b.cyl(r * 1.08, r, h * 0.06, 8, MD.shade(color, 0.6), { y: h - h * 0.03 });
+  var m = b.mesh({ shadow: true });
+  m.position.set(x, y, z); if (o.rz) m.rotation.z = o.rz; if (o.rx) m.rotation.x = o.rx;
+  parent.add(m);
+  var tip = new THREE.Object3D(); tip.position.set(0, h, 0); m.add(tip);
+  return tip;
+};
+function sideDecals(parent, lv, texOpts, w, h, x, y, zHalf) {
+  var a = LP.decal(LP.liveryTexture(lv, texOpts), w, h, { x: x, y: y, z: zHalf + 0.012 });
+  var o2 = shallow(texOpts); o2.mirror = true;
+  var b = LP.decal(LP.liveryTexture(lv, o2), w, h, { x: x, y: y, z: -zHalf - 0.012, face: '-z' });
+  parent.add(a, b);
+  return [a, b];
+}
+MD.sideDecals = sideDecals;
+
+/** Stock-look 4x4 diesel pickup (Street / Work / Pro Stock base). veh.modelOpts can tweak {stacks, flares, lift}. */
+MD.pickup = function (livery, veh) {
+  var lv = TP.liveryFor(veh && veh.id, livery), P = TP.palette, mo = (veh && veh.modelOpts) || {};
+  var base = hexNum(lv.base, 0x2459a8), acc = hexNum(lv.accent, 0xf3efe6), trim = hexNum(lv.trim, 0x17140f);
+  var wb = (veh && veh.specs && veh.specs.wheelbase) || 3.9, R = (veh && veh.specs && veh.specs.wheelRadius) || 0.56;
+  var root = new THREE.Group(), body = new THREE.Group(); root.add(body);
+  var lift = mo.lift != null ? mo.lift : 0.28, fy = R + lift;    // frame height
+  var b = LP.builder();
+  // frame + bumpers + hitch receiver
+  b.box(wb + 2.4, 0.18, 0.9, P.steelDark, { x: wb / 2 - 0.2, y: fy - 0.05 });
+  b.box(0.25, 0.28, 2.0, P.chrome, { x: wb + 1.2, y: fy + 0.05 });
+  b.box(0.2, 0.25, 1.9, trim, { x: -1.55, y: fy + 0.05 });
+  // bed
+  var bedL = 2.3, bedX = -0.45;
+  b.box(bedL, 0.62, 2.0, base, { x: bedX, y: fy + 0.5 });
+  b.box(bedL, 0.08, 1.96, MD.shade(base, 1.12), { x: bedX, y: fy + 0.84 });
+  b.box(0.1, 0.62, 2.0, base, { x: bedX - bedL / 2 + 0.05, y: fy + 0.5 });
+  // cab
+  b.cab(1.9, 1.3, 2.0, base, { x: 1.62, y: fy + 0.2, taperX: 0.72, taperZ: 0.9 });
+  // hood + fenders + grille
+  b.taper(1.6, 0.6, 2.0, 1.0, 0.94, base, { x: 3.35, y: fy + 0.55 });
+  b.box(0.18, 0.66, 1.95, MD.shade(trim, 1.15), { x: 4.2, y: fy + 0.52 });
+  for (var gy = 0; gy < 3; gy++) b.box(0.05, 0.08, 1.5, P.chrome, { x: 4.3, y: fy + 0.35 + gy * 0.17 });
+  b.box(0.06, 0.16, 0.36, 0xfff6c8, { x: 4.3, y: fy + 0.68, z: 0.78 }).box(0.06, 0.16, 0.36, 0xfff6c8, { x: 4.3, y: fy + 0.68, z: -0.78 });
+  b.box(0.24, 0.7, 0.18, P.chrome, { x: 4.28, y: fy + 0.5 });
+  // flares + running boards + mirrors + light bar
+  [0, wb].forEach(function (ax) { [-1, 1].forEach(function (s) { b.taper(1.5, 0.28, 0.22, 0.75, 1, trim, { x: ax, y: fy + 0.25, z: s * 1.06 }); }); });
+  [-1, 1].forEach(function (s) { b.box(1.7, 0.06, 0.24, P.steelDark, { x: 1.7, y: fy + 0.05, z: s * 1.06 }); b.box(0.1, 0.3, 0.26, trim, { x: 2.2, y: fy + 1.1, z: s * 1.14 }); });
+  b.box(0.2, 0.12, 1.5, trim, { x: 1.9, y: fy + 1.55 });
+  for (var l = 0; l < 5; l++) b.box(0.05, 0.08, 0.2, 0xfff2b0, { x: 2.0, y: fy + 1.55, z: -0.6 + l * 0.3 });
+  // tail lights
+  b.box(0.04, 0.3, 0.12, 0xd23a2a, { x: -1.62, y: fy + 0.55, z: 0.92 }).box(0.04, 0.3, 0.12, 0xd23a2a, { x: -1.62, y: fy + 0.55, z: -0.92 });
+  // front weight bracket with suitcase weights (pulling truck)
+  b.box(0.5, 0.12, 0.9, P.steelDark, { x: wb + 1.5, y: fy - 0.05 });
+  for (var wgt = 0; wgt < 4; wgt++) b.box(0.12, 0.42, 0.85, wgt % 2 ? acc : P.steel, { x: wb + 1.42 + wgt * 0.14, y: fy + 0.18 });
+  // axles / diffs
+  b.cyl(0.08, 0.08, 1.9, 6, P.steelDark, { axis: 'z', y: R }).cyl(0.08, 0.08, 1.9, 6, P.steelDark, { axis: 'z', x: wb, y: R });
+  b.sphere(0.2, P.steelDark, { y: R }).sphere(0.18, P.steelDark, { x: wb, y: R });
+  body.add(b.mesh({ shadow: true }));
+  // livery decals
+  sideDecals(body, lv, { brand: veh && veh.brand, w: 512, h: 128, numberX: 0.42 }, 4.4, 1.1, 1.3, fy + 0.62, 1.0);
+  var hood = LP.decal(LP.numberTexture(lv.number || '1', { bg: lv.numberBg || '#f3efe6' }), 0.7, 0.7, { face: 'up', x: 3.4, y: fy + 0.86 });
+  body.add(hood);
+  // stacks through the bed
+  var stacks = [], sc = mo.stacks || 2;
+  for (var i = 0; i < sc; i++) {
+    var z = sc === 1 ? 0 : (i / (sc - 1) - 0.5) * 1.1;
+    stacks.push(MD.stack(body, 0.05, fy + 0.3, z, 2.2, 0.1, P.chrome));
+  }
+  // turbo behind the hood (stock look) — a hint of chrome
+  var tb = LP.builder().cyl(0.16, 0.16, 0.2, 8, P.chrome, { axis: 'z' }).mesh(); tb.position.set(3.8, fy + 0.95, 0.3); body.add(tb);
+  // hitch
+  var hitch = new THREE.Object3D(); hitch.position.set(-1.75, (veh && veh.specs && veh.specs.hitchHeight) || 0.62, 0); root.add(hitch);
+  var hb = LP.builder().box(0.5, 0.12, 0.12, P.steelDark, { x: -1.55, y: hitch.position.y }).cyl(0.06, 0.06, 0.04, 8, P.steel, { x: -1.78, y: hitch.position.y, axis: 'x' }).mesh();
+  body.add(hb);
+  var wheels = { front: [], rear: [] };
+  [-1, 1].forEach(function (s) {
+    var o = { lugs: 16, lugDepth: 0.07, seg: 16, rimColor: lv.rim || P.chrome };
+    var r1 = MD.wheel(R, 0.42, o); r1.position.set(0, R, s * 0.92); root.add(r1); wheels.rear.push(r1);
+    var f1 = MD.wheel(R, 0.42, o); f1.position.set(wb, R, s * 0.92); root.add(f1); wheels.front.push(f1);
+  });
+  return { root: root, body: body, wheels: wheels, stacks: stacks, hitch: hitch, frontEnd: null, radius: { front: R, rear: R }, length: wb + 3.4 };
+};
+
+/** Farm tractor (Farm Stock / Hot Farm base): huge ag tires, long hood, ROPS, suitcase weights. */
+MD.tractor = function (livery, veh) {
+  var lv = TP.liveryFor(veh && veh.id, livery), P = TP.palette, mo = (veh && veh.modelOpts) || {};
+  var base = hexNum(lv.base, 0x2e7d32), acc = hexNum(lv.accent, 0xffd23f), trim = hexNum(lv.trim, 0x1a1a1a);
+  var s = (veh && veh.specs) || {}, wb = s.wheelbase || 2.9, R = s.wheelRadius || 0.92, Rf = mo.frontRadius || 0.46;
+  var root = new THREE.Group(), body = new THREE.Group(); root.add(body);
+  var b = LP.builder();
+  // transmission / rear housing
+  b.box(1.2, 0.9, 1.0, MD.shade(base, 0.8), { x: 0.1, y: R + 0.1 });
+  b.cyl(0.12, 0.12, 2.3, 8, P.steelDark, { axis: 'z', y: R });
+  // engine block + hood
+  b.box(2.4, 0.7, 0.8, P.steelDark, { x: 1.6, y: R + 0.15 });
+  b.taper(2.6, 0.75, 1.0, 1.0, 0.86, base, { x: 1.75, y: R + 0.75 });
+  b.box(0.2, 0.85, 1.0, trim, { x: 3.1, y: R + 0.55 });
+  for (var gy = 0; gy < 4; gy++) b.box(0.04, 0.06, 0.8, P.steel, { x: 3.21, y: R + 0.25 + gy * 0.17 });
+  b.box(2.5, 0.1, 0.12, acc, { x: 1.8, y: R + 0.85, z: 0.5 }).box(2.5, 0.1, 0.12, acc, { x: 1.8, y: R + 0.85, z: -0.5 });
+  // front axle + bolster
+  b.box(0.3, 0.3, 1.8, P.steelDark, { x: wb, y: Rf + 0.05 });
+  b.box(0.6, 0.45, 0.5, P.steelDark, { x: wb, y: Rf + 0.35 });
+  // weight bracket with suitcase weights
+  b.box(0.6, 0.2, 1.0, P.steelDark, { x: wb + 0.55, y: R * 0.85 });
+  for (var w = 0; w < 6; w++) b.box(0.1, 0.55, 0.95, w % 2 ? acc : MD.shade(base, 0.9), { x: wb + 0.32 + w * 0.12, y: R * 0.85 + 0.35 });
+  // operator platform, seat, steering wheel, fenders
+  b.box(1.0, 0.08, 1.4, P.steelDark, { x: -0.45, y: R + 0.55 });
+  b.box(0.45, 0.12, 0.5, 0x2a2a2a, { x: -0.5, y: R + 0.85 }).box(0.1, 0.55, 0.5, 0x2a2a2a, { x: -0.75, y: R + 1.1 });
+  b.cyl(0.04, 0.04, 0.7, 6, P.steelDark, { x: 0.1, y: R + 1.0, rz: 0.6 });
+  b.cyl(0.22, 0.22, 0.04, 10, 0x1a1a1a, { x: -0.12, y: R + 1.32, rz: 0.6 });
+  [-1, 1].forEach(function (sd) {
+    b.taper(1.9, 0.12, 0.7, 0.9, 1, base, { x: 0, y: R * 2 + 0.06, z: sd * 1.0 });
+    b.box(1.9, 0.5, 0.08, base, { x: 0, y: R * 1.8 + 0.06, z: sd * 0.66, rx: 0 });
+    b.box(0.08, 0.5, 0.7, base, { x: 0.92, y: R * 1.75, z: sd * 1.0 });
+  });
+  // ROPS (roll bar) with canopy
+  [-1, 1].forEach(function (sd) { b.box(0.1, 1.6, 0.1, P.steelDark, { x: -0.95, y: R + 1.2, z: sd * 0.62 }); b.box(0.1, 1.5, 0.1, P.steelDark, { x: 0.15, y: R + 1.25, z: sd * 0.62 }); });
+  b.box(1.4, 0.1, 1.5, base, { x: -0.4, y: R + 2.05 });
+  b.box(1.2, 0.08, 0.1, P.steelDark, { x: -0.4, y: R + 1.97, z: 0.62 });
+  // drawbar
+  b.box(1.0, 0.1, 0.18, P.steel, { x: -0.65, y: (s.hitchHeight || 0.55) });
+  body.add(b.mesh({ shadow: true }));
+  sideDecals(body, lv, { brand: veh && veh.brand, w: 512, h: 128, numberX: 0.72 }, 2.6, 0.65, 1.75, R + 0.78, 0.47);
+  var stacks = [MD.stack(body, 1.25, R + 1.0, 0, mo.stackH || 1.6, 0.09, P.chrome)];
+  if (mo.twinStacks) stacks.push(MD.stack(body, 1.25, R + 1.0, 0.25, mo.stackH || 1.6, 0.09, P.chrome));
+  var hitch = new THREE.Object3D(); hitch.position.set(-1.15, s.hitchHeight || 0.55, 0); root.add(hitch);
+  var wheels = { front: [], rear: [] };
+  [-1, 1].forEach(function (sd) {
+    var r1 = MD.wheel(R, 0.62, { lugs: 14, lugDepth: 0.1, seg: 18, chevron: true, rimColor: lv.rim || acc, rim: R * 0.6 }); r1.position.set(0, R, sd * 1.0); root.add(r1); wheels.rear.push(r1);
+    var f1 = MD.wheel(Rf, 0.28, { lugs: 10, lugDepth: 0.04, seg: 14, rimColor: lv.rim || acc }); f1.position.set(wb, Rf, sd * 0.8); root.add(f1); wheels.front.push(f1);
+  });
+  return { root: root, body: body, wheels: wheels, stacks: stacks, hitch: hitch, frontEnd: null, radius: { front: Rf, rear: R }, length: wb + 2 };
+};
+
+/** Mini rod: tiny tube chassis, blown V8 with zoomie stacks, wheelie bars. */
+MD.miniRod = function (livery, veh) {
+  var lv = TP.liveryFor(veh && veh.id, livery), P = TP.palette;
+  var base = hexNum(lv.base, 0xff6a1a), acc = hexNum(lv.accent, 0xffd23f), trim = hexNum(lv.trim, 0x17140f);
+  var s = (veh && veh.specs) || {}, wb = s.wheelbase || 2.3, R = s.wheelRadius || 0.62, Rf = 0.3;
+  var root = new THREE.Group(), body = new THREE.Group(); root.add(body);
+  var b = LP.builder();
+  // chassis rails
+  [-1, 1].forEach(function (sd) { b.box(wb + 1.2, 0.1, 0.1, P.steelDark, { x: wb / 2 - 0.1, y: 0.45, z: sd * 0.32 }); });
+  b.box(0.3, 0.3, 1.5, P.steelDark, { x: 0, y: R });
+  // body tub + nose
+  b.taper(1.6, 0.45, 0.8, 0.85, 0.85, base, { x: 1.35, y: 0.72 });
+  b.wedge(0.8, 0.4, 0.75, base, { x: 2.5, y: 0.6, slope: 0.6 });
+  b.box(0.2, 0.18, 1.2, trim, { x: wb + 0.35, y: Rf + 0.05 });
+  // blown big block
+  b.box(0.9, 0.55, 0.6, P.chrome, { x: 1.2, y: 1.15 });
+  b.box(0.75, 0.32, 0.45, base, { x: 1.2, y: 1.58 });          // blower case
+  b.box(0.5, 0.2, 0.55, P.chrome, { x: 1.2, y: 1.85 });         // hat
+  for (var i = 0; i < 6; i++) b.box(0.03, 0.3, 0.42, P.steelDark, { x: 0.98 + i * 0.09, y: 1.58 });
+  // seat + cage
+  b.box(0.5, 0.14, 0.5, 0x222222, { x: 0.15, y: 0.75 }).box(0.12, 0.6, 0.5, 0x222222, { x: -0.12, y: 1.0 });
+  [-1, 1].forEach(function (sd) {
+    b.box(0.06, 1.0, 0.06, acc, { x: -0.2, y: 1.15, z: sd * 0.35 });
+    b.box(0.06, 0.9, 0.06, acc, { x: 0.55, y: 1.1, z: sd * 0.35, rz: 0.35 });
+    // wheelie bars
+    b.box(1.6, 0.05, 0.05, P.steel, { x: -1.15, y: 0.42, z: sd * 0.3, rz: 0.08 });
+  });
+  b.box(0.8, 0.06, 0.76, acc, { x: 0.15, y: 1.66 });
+  b.box(0.08, 0.08, 0.8, P.steel, { x: -1.9, y: 0.32 });
+  // fenders
+  [-1, 1].forEach(function (sd) { b.taper(1.3, 0.1, 0.55, 0.8, 1, base, { x: 0, y: R * 2 + 0.06, z: sd * 0.82 }); });
+  body.add(b.mesh({ shadow: true }));
+  // wheelie bar wheels
+  [-1, 1].forEach(function (sd) { var ww = LP.mesh(LP.tire(0.1, 0.06, { lugs: 6, seg: 8 })); ww.position.set(-1.95, 0.1, sd * 0.3); body.add(ww); });
+  sideDecals(body, lv, { brand: veh && veh.brand, w: 512, h: 128, numberX: 0.4 }, 1.9, 0.48, 1.6, 0.74, 0.37);
+  var stacks = [];
+  [-1, 1].forEach(function (sd) { for (var k = 0; k < 4; k++) stacks.push(MD.stack(body, 0.95 + k * 0.17, 1.15, sd * 0.33, 0.45, 0.05, P.chrome, { rx: sd * 0.7 })); });
+  var hitch = new THREE.Object3D(); hitch.position.set(-0.85, s.hitchHeight || 0.5, 0); root.add(hitch);
+  var wheels = { front: [], rear: [] };
+  [-1, 1].forEach(function (sd) {
+    var r1 = MD.wheel(R, 0.5, { lugs: 20, lugDepth: 0.06, seg: 18, chevron: true, rimColor: lv.rim || P.chrome }); r1.position.set(0, R, sd * 0.82); root.add(r1); wheels.rear.push(r1);
+    var f1 = MD.wheel(Rf, 0.14, { lugs: 8, lugDepth: 0.02, seg: 12, rimColor: P.chrome }); f1.position.set(wb, Rf, sd * 0.55); root.add(f1); wheels.front.push(f1);
+  });
+  return { root: root, body: body, wheels: wheels, stacks: stacks, hitch: hitch, frontEnd: null, radius: { front: Rf, rear: R }, length: wb + 2.3 };
+};
+
+/** The weight-transfer sled. Origin = the hook at the FRONT of the sled; the sled extends toward -X.
+ *  Returns {root, box (slides), boxFront, boxRear, pan, wheels:[...], hook, cab}. */
+MD.sled = function (o) {
+  o = o || {};
+  var P = TP.palette, root = new THREE.Group();
+  var col = hexNum(o.color, 0xffc61a), dark = 0x2b2b2b;
+  var b = LP.builder();
+  // frame rails
+  [-1, 1].forEach(function (sd) { b.box(8.6, 0.28, 0.22, dark, { x: -4.6, y: 0.95, z: sd * 1.05 }); b.box(8.0, 0.08, 0.3, col, { x: -4.6, y: 1.13, z: sd * 1.05 }); });
+  for (var c = 0; c < 6; c++) b.box(0.15, 0.15, 2.2, dark, { x: -1 - c * 1.5, y: 0.9 });
+  // pan (front skid plate) + hook arm
+  b.taper(1.5, 0.3, 2.6, 1.15, 1, P.steel, { x: -1.0, y: 0.18 });
+  b.box(1.2, 0.18, 0.22, dark, { x: -0.55, y: 0.6, rz: -0.3 });
+  b.box(0.3, 0.3, 0.3, dark, { x: -0.1, y: 0.5 });
+  // rear axle housing + operator cab tower
+  b.box(0.4, 0.4, 2.8, dark, { x: -8.0, y: 0.8 });
+  b.box(1.5, 0.15, 2.4, dark, { x: -8.6, y: 1.25 });
+  b.box(1.2, 1.4, 1.2, col, { x: -8.7, y: 2.0, z: 0.5 });
+  b.box(1.0, 0.6, 1.24, P.glass, { x: -8.65, y: 2.35, z: 0.5 });
+  b.box(1.4, 0.1, 1.4, dark, { x: -8.7, y: 2.75, z: 0.5 });
+  b.cyl(0.05, 0.05, 1.2, 6, P.steelDark, { x: -8.2, y: 3.3, z: -0.8 });
+  b.box(0.12, 0.12, 0.12, 0xff3b1a, { x: -8.2, y: 3.95, z: -0.8 });
+  root.add(b.mesh({ shadow: true }));
+  var sign = LP.decal(LP.textTexture(o.label || 'FULL PULL SLED CO.', { w: 512, h: 96, bg: '#17140f', fg: '#ffd23f' }), 4.8, 0.55, { x: -4.6, y: 0.95, z: 1.17 });
+  root.add(sign);
+  var sign2 = sign.clone(); sign2.position.z = -1.17; sign2.rotation.y = Math.PI; root.add(sign2);
+  // weight box (stack of plates)
+  var box = new THREE.Group();
+  var bb = LP.builder();
+  bb.box(1.7, 0.2, 2.3, dark, { y: 1.3 });
+  for (var k = 0; k < 4; k++) bb.box(1.5, 0.32, 2.1, k % 2 ? col : 0xd23a2a, { y: 1.58 + k * 0.33 });
+  bb.box(1.0, 0.25, 0.8, dark, { y: 2.98 });
+  box.add(bb.mesh({ shadow: true }));
+  root.add(box);
+  var wheels = [];
+  [-1, 1].forEach(function (sd) {
+    var w = MD.wheel(0.62, 0.45, { lugs: 14, lugDepth: 0.06, seg: 14, rimColor: col }); w.position.set(-8.0, 0.62, sd * 1.35); root.add(w); wheels.push(w);
+  });
+  var hook = new THREE.Object3D(); hook.position.set(0.05, 0.5, 0); root.add(hook);
+  var pan = new THREE.Object3D(); pan.position.set(-1.0, 0.05, 0); root.add(pan);
+  return { root: root, box: box, boxFront: -2.2, boxRear: -7.2, pan: pan, wheels: wheels, hook: hook, length: 9.4 };
+};
+
+/* ---------------------------------------------------------------------------
+ * 16. VENUES  TP.venueKit (helpers) + TP.loadVenue(id)
+ *   Core builds the standard pulling pad for every venue (dirt track, boundary
+ *   lines, start/finish lines, 50 ft markers, distance board) unless the venue
+ *   sets customTrack:true. venue.build(ctx) adds everything else.
+ * ------------------------------------------------------------------------- */
+var VK = TP.venueKit = {};
+/** Dirt texture. o = {base, light, dark, grooves:bool, wet 0..1} */
+VK.dirtTexture = function (o) {
+  o = o || {};
+  return LP.canvasTexture(256, 256, function (c, w, h) {
+    var wet = o.wet || 0;
+    c.fillStyle = o.base || (wet > 0.5 ? '#5a3a20' : '#8a5a32'); c.fillRect(0, 0, w, h);
+    var rng = makeRng(o.seed || 7);
+    for (var i = 0; i < 1400; i++) {
+      var v = rng(); c.fillStyle = v < 0.5 ? (o.dark || 'rgba(60,35,15,0.35)') : (o.light || 'rgba(190,140,90,0.3)');
+      var s = 1 + rng() * 4; c.fillRect(rng() * w, rng() * h, s, s);
+    }
+    if (o.grooves) {
+      c.strokeStyle = 'rgba(50,28,12,0.28)';
+      for (var g = 0; g < 26; g++) { c.lineWidth = 1 + rng() * 2; var y = rng() * h; c.beginPath(); c.moveTo(0, y); c.lineTo(w, y + (rng() - 0.5) * 6); c.stroke(); }
+    }
+  }, { repeat: o.repeat || [1, 1] });
+};
+VK.grassTexture = function (o) {
+  o = o || {};
+  return LP.canvasTexture(256, 256, function (c, w, h) {
+    c.fillStyle = o.base || '#6e9e3e'; c.fillRect(0, 0, w, h);
+    var rng = makeRng(11);
+    for (var i = 0; i < 2200; i++) { c.fillStyle = rng() < 0.5 ? 'rgba(60,100,30,0.35)' : 'rgba(150,190,90,0.3)'; c.fillRect(rng() * w, rng() * h, 2, 2 + rng() * 4); }
+  }, { repeat: o.repeat || [40, 40] });
+};
+/** Flat textured ground plane. */
+VK.plane = function (ctx, w, d, tex, o) {
+  o = o || {};
+  var m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, color: o.color != null ? o.color : 0xffffff }));
+  m.rotation.x = -Math.PI / 2; m.position.set(o.x || 0, o.y || 0, o.z || 0); m.receiveShadow = true;
+  ctx.group.add(m); return m;
+};
+/** Bleacher section: rows stepping up away from the track (toward +Z if side=1). Returns seat positions. */
+VK.bleachers = function (b, x0, x1, z0, rows, side, o) {
+  o = o || {}; side = side || 1;
+  var seats = [], P = TP.palette, len = x1 - x0, cx = (x0 + x1) / 2;
+  for (var r = 0; r < rows; r++) {
+    var y = 0.5 + r * 0.45, z = z0 + side * r * 0.8;
+    b.box(len, 0.08, 0.5, o.seat || 0xc9ccd1, { x: cx, y: y, z: z });
+    b.box(len, 0.45, 0.06, o.riser || 0x8e979f, { x: cx, y: y - 0.25, z: z - side * 0.3 });
+    for (var s = x0 + 0.4; s < x1 - 0.3; s += 0.62) seats.push({ x: s + (Math.random() - 0.5) * 0.15, y: y + 0.05, z: z, ry: side > 0 ? 0 : Math.PI });
+  }
+  for (var p = x0; p <= x1 + 0.01; p += len / Math.max(1, Math.round(len / 6))) b.box(0.15, 0.5 + rows * 0.45, 0.15, P.steelDark, { x: p, y: (0.5 + rows * 0.45) / 2, z: z0 + side * (rows - 1) * 0.8 });
+  if (o.roof) {
+    var top = 1.6 + rows * 0.45 + 1.8, zb = z0 + side * (rows - 1) * 0.8;
+    b.box(len + 1, 0.15, rows * 0.8 + 1.4, o.roof, { x: cx, y: top, z: z0 + side * (rows - 1) * 0.4, rx: -side * 0.08 });
+    for (var q = x0; q <= x1 + 0.01; q += len / Math.max(1, Math.round(len / 8))) b.box(0.18, top, 0.18, P.steelDark, { x: q, y: top / 2, z: zb + side * 0.3 });
+  }
+  return seats;
+};
+/** Instanced crowd from seat positions. Returns {meshes, update(dt)}; cheer level from TP.audio crowd + TP.venueState.cheer. */
+VK.crowd = function (ctx, seats, o) {
+  o = o || {};
+  var max = TP.quality === 'low' ? Math.min(seats.length, o.maxLow || 260) : Math.min(seats.length, o.max || 700);
+  if (seats.length > max) { var step = seats.length / max, sel = []; for (var i = 0; i < max; i++) sel.push(seats[Math.floor(i * step)]); seats = sel; }
+  var groups = 4, P = TP.palette, rng = makeRng(o.seed || 5);
+  var bodyGeo = LP.merge([LP.box(0.42, 0.55, 0.28, 0xffffff, { y: 0.32 }), LP.box(0.44, 0.12, 0.3, 0xdddddd, { y: 0.02 })]);
+  var headGeo = LP.merge([LP.box(0.24, 0.26, 0.24, 0xffffff, { y: 0.74 })]);
+  var hatGeo = LP.merge([LP.box(0.3, 0.06, 0.32, 0xffffff, { y: 0.88, x: 0.02 }), LP.box(0.26, 0.1, 0.26, 0xffffff, { y: 0.93 })]);
+  var mat = LP.mat('vc', { rough: 0.85, instColor: true });   // separate material: instanceColor programs must not be shared
+  var out = { meshes: [], phase: [] };
+  var dummy = new THREE.Object3D(), col = new THREE.Color();
+  for (var g = 0; g < groups; g++) {
+    var list = seats.filter(function (s, k) { return k % groups === g; });
+    if (!list.length) continue;
+    var mb = new THREE.InstancedMesh(bodyGeo, mat, list.length), mh = new THREE.InstancedMesh(headGeo, mat, list.length), mt = new THREE.InstancedMesh(hatGeo, mat, list.length);
+    for (var k = 0; k < list.length; k++) {
+      var s = list[k];
+      dummy.position.set(s.x, s.y, s.z); dummy.rotation.set(0, s.ry || 0, 0); dummy.scale.setScalar(0.92 + rng() * 0.2); dummy.updateMatrix();
+      mb.setMatrixAt(k, dummy.matrix); mh.setMatrixAt(k, dummy.matrix);
+      col.set(P.shirts[(rng() * P.shirts.length) | 0]).convertSRGBToLinear(); mb.setColorAt(k, col);
+      col.set(P.skin[(rng() * P.skin.length) | 0]).convertSRGBToLinear(); mh.setColorAt(k, col);
+      if (rng() < 0.45) { col.set([0xd23a2a, 0xf3efe6, 0x2565ae, 0x1b1b1b, 0xd8b25a][(rng() * 5) | 0]).convertSRGBToLinear(); dummy.scale.multiplyScalar(1); dummy.updateMatrix(); mt.setMatrixAt(k, dummy.matrix); mt.setColorAt(k, col); }
+      else { dummy.scale.setScalar(0.0001); dummy.updateMatrix(); mt.setMatrixAt(k, dummy.matrix); mt.setColorAt(k, col.set(0)); }
+    }
+    var grp = new THREE.Group(); grp.add(mb, mh, mt);
+    [mb, mh, mt].forEach(function (m) { m.castShadow = false; m.receiveShadow = false; m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; });
+    ctx.group.add(grp); out.meshes.push(grp); out.phase.push(g * 1.7);
+  }
+  out.update = function (dt) {
+    var ch = TP.venueState ? TP.venueState.cheer : 0, t = TP.time;
+    for (var i = 0; i < out.meshes.length; i++) {
+      var j = Math.max(0, Math.sin(t * (7 + i) + out.phase[i]));
+      out.meshes[i].position.y = (0.03 + 0.22 * ch) * j;
+    }
+  };
+  ctx.addUpdate(out.update);
+  return out;
+};
+/** Instanced low-poly trees at positions [{x,z,s}]. */
+VK.trees = function (ctx, pts) {
+  var geo = LP.merge([LP.cyl(0.18, 0.25, 1.6, 6, 0x6b4a2a, { y: 0.8 }), LP.cone(1.5, 2.6, 7, 0x3f7a2e, { y: 2.6 }), LP.cone(1.15, 2.0, 7, 0x4d8f36, { y: 3.7 }), LP.cone(0.7, 1.4, 7, 0x5fa040, { y: 4.6 })]);
+  var m = new THREE.InstancedMesh(geo, LP.mat('vc', { instanced: true }), pts.length), d = new THREE.Object3D();
+  pts.forEach(function (p, i) { d.position.set(p.x, 0, p.z); d.rotation.set(0, p.x * 1.3, 0); d.scale.setScalar(p.s || 1); d.updateMatrix(); m.setMatrixAt(i, d.matrix); });
+  m.castShadow = false; ctx.group.add(m); return m;
+};
+/** Round hay bales [{x,z,ry}] (instanced). */
+VK.hay = function (ctx, pts) {
+  var geo = LP.merge([LP.cyl(0.62, 0.62, 1.1, 10, TP.palette.hay, { axis: 'z', y: 0.62 }), LP.cyl(0.4, 0.4, 1.12, 10, TP.palette.hayDark, { axis: 'z', y: 0.62 })]);
+  var m = new THREE.InstancedMesh(geo, LP.mat('vc', { instanced: true }), pts.length), d = new THREE.Object3D();
+  pts.forEach(function (p, i) { d.position.set(p.x, 0, p.z); d.rotation.set(0, p.ry || 0, 0); d.updateMatrix(); m.setMatrixAt(i, d.matrix); });
+  m.castShadow = TP.quality === 'high'; m.receiveShadow = true; ctx.group.add(m); return m;
+};
+/** Pennant string between two points. */
+VK.pennants = function (b, x0, x1, y, z, colors) {
+  var n = Math.round((x1 - x0) / 0.8);
+  for (var i = 0; i < n; i++) { var x = x0 + i * 0.8 + 0.4, sag = Math.sin(i / n * Math.PI) * 0.6; b.wedge(0.5, 0.45, 0.02, colors[i % colors.length], { x: x, y: y - sag - 0.2, z: z, rz: -Math.PI / 2, slope: 1 }); }
+};
+/** Sponsor banner on the fence (fictional names only). */
+VK.banner = function (ctx, text, x, y, z, w, h, o) {
+  o = o || {};
+  var t = LP.textTexture(text, { w: 512, h: 128, bg: o.bg || '#17140f', fg: o.fg || '#ffd23f', border: o.border || '#fff4dc', borderWidth: 6, size: o.size });
+  var m = LP.decal(t, w, h, { x: x, y: y, z: z, face: o.face });
+  ctx.group.add(m); return m;
+};
+/** Live distance board: returns {mesh, set(text, sub)} — redraws only when text changes. */
+VK.board = function (ctx, x, y, z, o) {
+  o = o || {};
+  var b = LP.builder();
+  b.box(5.4, 2.4, 0.3, 0x17140f, { y: y }).box(0.3, y, 0.3, TP.palette.steelDark, { x: -2, y: y / 2 - 0.6 }).box(0.3, y, 0.3, TP.palette.steelDark, { x: 2, y: y / 2 - 0.6 });
+  var grp = new THREE.Group(); grp.add(b.mesh({ shadow: true }));
+  var last = '';
+  var tex = LP.canvasTexture(512, 224, function () {});
+  var draw = function (txt, sub) {
+    var c = tex.userData.ctx, w = 512, h = 224;
+    c.fillStyle = '#100d0a'; c.fillRect(0, 0, w, h);
+    c.strokeStyle = '#ffd23f'; c.lineWidth = 6; c.strokeRect(6, 6, w - 12, h - 12);
+    c.fillStyle = '#ff7a1a'; c.font = '800 34px "Saira Condensed", "Arial Narrow", Impact, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(sub || 'DISTANCE', w / 2, 38);
+    c.fillStyle = '#ffd23f'; c.font = '900 112px "Saira Condensed", "Arial Narrow", Impact, sans-serif';
+    c.fillText(txt, w / 2, 136);
+    tex.needsUpdate = true;
+  };
+  draw('0.00', o.sub);
+  var face = LP.decal(tex, 5.0, 2.2, { z: o.face === '-z' ? -0.17 : 0.17, y: y, face: o.face, emissive: 0.6 });
+  grp.add(face);
+  grp.position.set(x, 0, z); if (o.ry) grp.rotation.y = o.ry;
+  ctx.group.add(grp);
+  return { mesh: grp, set: function (txt, sub) { var k = txt + '|' + (sub || ''); if (k === last) return; last = k; draw(txt, sub); } };
+};
+
+/** Standard pulling pad: track, lines, markers. ctx.track = {length, laneHalf, width}. */
+VK.standardTrack = function (ctx, o) {
+  o = o || {};
+  var L = ctx.track.length, lh = ctx.track.laneHalf, P = TP.palette, wet = ctx.trackCondition || 0;
+  var trackW = o.width || 29, x0 = -30, x1 = L + 40;
+  var dirt = VK.dirtTexture({ grooves: true, wet: wet, repeat: [(x1 - x0) / 8, trackW / 8], base: o.dirtBase });
+  var pad = VK.plane(ctx, x1 - x0, trackW, dirt, { x: (x0 + x1) / 2, y: 0.005 });
+  var b = LP.builder();
+  // berms along the pad edge
+  [-1, 1].forEach(function (s) { b.taper(x1 - x0, 0.35, 1.6, 1, 0.5, P.dirtDark, { x: (x0 + x1) / 2, y: 0.17, z: s * (trackW / 2 + 0.6) }); });
+  // boundary lines (chalk) + start/finish
+  [-1, 1].forEach(function (s) { b.box(x1 - x0 - 10, 0.02, 0.14, 0xf3efe6, { x: (x0 + x1) / 2 - 5, y: 0.02, z: s * lh }); });
+  b.box(0.3, 0.025, lh * 2, 0xf3efe6, { x: 0, y: 0.022 });
+  for (var k = 0; k < 10; k++) b.box(0.3, 0.026, lh * 2 / 10, k % 2 ? 0x121212 : 0xf3efe6, { x: L, y: 0.024, z: -lh + lh * 2 * (k + 0.5) / 10 });
+  // 50 ft markers: cones + ticks
+  for (var ft = 50; ft <= ctx.track.lengthFt; ft += 50) {
+    var x = ft * C.FT;
+    b.box(0.12, 0.022, 0.8, 0xf3efe6, { x: x, y: 0.021, z: -lh + 0.4 }).box(0.12, 0.022, 0.8, 0xf3efe6, { x: x, y: 0.021, z: lh - 0.4 });
+    [-1, 1].forEach(function (s) { b.cone(0.22, 0.6, 6, P.orange, { x: x, y: 0.3, z: s * (lh + 0.9) }); b.box(0.36, 0.05, 0.36, P.orange, { x: x, y: 0.03, z: s * (lh + 0.9) }); });
+    var sign = LP.decal(LP.textTexture(String(ft), { w: 256, h: 128, bg: '#fff4dc', fg: '#17140f', border: '#ff7a1a' }), 1.4, 0.7, { x: x, y: 1.2, z: -(lh + 1.6) });
+    ctx.group.add(sign);
+    b.box(0.08, 1.0, 0.08, P.steelDark, { x: x, y: 0.5, z: -(lh + 1.65) });
+  }
+  ctx.group.add(b.mesh({ receive: true }));
+  // finish flag poles + start tree (lights tower)
+  var fb = LP.builder();
+  [-1, 1].forEach(function (s) { fb.cyl(0.07, 0.07, 4, 6, P.steel, { x: L, y: 2, z: s * (lh + 2.2) }); fb.box(0.04, 0.8, 1.2, s > 0 ? 0x121212 : 0xf3efe6, { x: L, y: 3.5, z: s * (lh + 2.2) + 0.6 * s }); });
+  fb.box(0.3, 2.2, 0.3, 0x17140f, { x: -1.5, y: 1.1, z: -(lh + 2.8) }).box(0.08, 1.2, 0.08, 0x17140f, { x: -1.5, y: 2.8, z: -(lh + 2.8) });
+  ctx.group.add(fb.mesh({ shadow: true }));
+  // start tree lights (emissive spheres, recolored at runtime)
+  var lights = [];
+  ['red', 'yellow', 'green'].forEach(function (c, i) {
+    var m = new THREE.Mesh(new THREE.IcosahedronGeometry(0.12, 1), new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0x000000, flatShading: true }));
+    m.position.set(-1.33, 2.0 - i * 0.32, -(lh + 2.8)); ctx.group.add(m); lights.push(m);
+  });
+  ctx.startLights = lights;
+  ctx.board = VK.board(ctx, L * 0.55, 4.6, -(lh + 9.2), { sub: 'DISTANCE' });
+  return pad;
+};
+
+/** Build (or reuse) a venue. Returns the venue state; emits 'venueLoaded'(venue). */
+TP.venueState = null;
+TP.loadVenue = function (id, o) {
+  o = o || {};
+  var def = TP.venues[id] || TP.venues.county_fair;
+  var tc = o.trackCondition != null ? o.trackCondition : (def.trackCondition != null ? def.trackCondition : 0.2);
+  var vs = TP.venueState;
+  if (vs && vs.id === def.id && !o.force) { vs.trackCondition = tc; return vs; }
+  if (vs) {
+    TP.scene.remove(vs.group);
+    vs.group.traverse(function (ob) { if (ob.geometry) ob.geometry.dispose(); if (ob.material && ob.material.map && !ob.material._shared) ob.material.map.dispose(); });
+    vs.updaters.length = 0;
+  }
+  var group = new THREE.Group(); group.name = 'venue:' + def.id;
+  TP.scene.add(group);
+  var maxFt = 0; for (var k in TP.classes) maxFt = Math.max(maxFt, TP.classes[k].trackLength || 300);
+  var ctx = {
+    id: def.id, def: def, group: group, updaters: [], trackCondition: tc, quality: TP.quality, lp: LP, kit: VK, palette: TP.palette,
+    rng: makeRng(hashStr(def.id)),
+    track: { lengthFt: maxFt, length: maxFt * C.FT, laneHalf: def.laneHalf || 4.6 },
+    addUpdate: function (fn) { ctx.updaters.push(fn); }, cheer: 0, startLights: null, board: null
+  };
+  TP.setSky(def.sky || {});
+  if (!def.customTrack) VK.standardTrack(ctx, def.trackOpts);
+  try { if (def.build) def.build(ctx); } catch (e) { console.error('[TP] venue build failed', def.id, e); }
+  TP.venueState = ctx;
+  TP.emit('venueLoaded', ctx);
+  return ctx;
+};
+TP.onFrame(function (dt) { var vs = TP.venueState; if (!vs) return; vs.cheer = Math.max(0, vs.cheer - dt * 0.4); for (var i = 0; i < vs.updaters.length; i++) vs.updaters[i](dt); });
+/** Make the crowd jump/roar. amount 0..1. */
+TP.cheer = function (amount) { if (TP.venueState) TP.venueState.cheer = Math.min(1.3, TP.venueState.cheer + (amount == null ? 1 : amount)); AU.cheer(amount); };
+
+TP.addVenue('county_fair', {
+  name: 'County Fairgrounds', desc: 'Saturday afternoon at the fair: bleachers packed, funnel cakes frying, and a freshly worked dirt track.',
+  levelReq: 1, timeOfDay: 'day', trackCondition: 0.2, crowdSize: 0.8,
+  sky: { top: 0x3d8fd8, horizon: 0xd6ebf2, sun: 0xfff0d8, sunIntensity: 2.4, hemiIntensity: 0.85, sunDir: [-0.45, 0.62, 0.64], fogNear: 160, fogFar: 650 },
+  build: function (ctx) {
+    var K = ctx.kit, P = ctx.palette, L = ctx.track.length, lh = ctx.track.laneHalf, g = ctx.group;
+    K.plane(ctx, 900, 900, K.grassTexture({ repeat: [90, 90] }), { x: 50, y: -0.01 });
+    var b = LP.builder(), seats = [];
+    // grandstand (+Z side, behind the track as seen from the side camera)
+    seats = seats.concat(K.bleachers(b, -6, 30, -(lh + 12), 9, -1, { roof: 0xb8322a }));
+    seats = seats.concat(K.bleachers(b, 32, 62, -(lh + 12), 8, -1, { roof: 0x2565ae }));
+    seats = seats.concat(K.bleachers(b, 64, 100, -(lh + 12), 7, -1, { roof: 0xb8322a }));
+    // small bleachers on the near side, far back
+    seats = seats.concat(K.bleachers(b, 20, 34, lh + 16, 4, 1, {}));
+    seats = seats.concat(K.bleachers(b, 60, 74, lh + 16, 4, 1, {}));
+    // fence (both sides): posts + 2 rails
+    [-1, 1].forEach(function (s) {
+      var z = s * (lh + 10.6);
+      b.box(L + 60, 0.08, 0.06, 0xf3efe6, { x: L / 2, y: 0.6, z: z }).box(L + 60, 0.08, 0.06, 0xf3efe6, { x: L / 2, y: 1.1, z: z });
+      for (var x = -30; x <= L + 30; x += 3) b.box(0.1, 1.2, 0.1, 0xe8e0d0, { x: x, y: 0.6, z: z });
+    });
+    // pennants over the grandstand
+    K.pennants(b, -6, 100, 6.2, -(lh + 11.2), [P.red, P.yellow, P.blue, P.cream, P.orange]);
+    // announcer booth + light poles + food stand + barn
+    b.box(4, 3, 3, P.cream, { x: 31, y: 7.5, z: -(lh + 17) }).box(4.4, 0.3, 3.4, P.red, { x: 31, y: 9.1, z: -(lh + 17) }).box(3.6, 1.0, 0.05, P.glass, { x: 31, y: 7.8, z: -(lh + 15.48) });
+    [-10, 40, 95].forEach(function (x) { b.cyl(0.18, 0.22, 16, 6, P.steel, { x: x, y: 8, z: -(lh + 26) }); b.box(3, 1.2, 0.4, P.steelDark, { x: x, y: 16, z: -(lh + 26) }); for (var i = 0; i < 4; i++) b.box(0.55, 0.45, 0.06, 0xfff6d0, { x: x - 1.1 + i * 0.73, y: 16, z: -(lh + 25.78) }); });
+    b.box(6, 3.2, 4, P.white, { x: 110, y: 1.6, z: -(lh + 22) }).taper(6.6, 1.2, 4.6, 1, 0.1, P.red, { x: 110, y: 3.8, z: -(lh + 22) });
+    b.box(10, 6, 8, P.barnRed, { x: -40, y: 3, z: -(lh + 30) }).taper(10.5, 3.5, 8.6, 1, 0.08, 0x5a2a20, { x: -40, y: 7.7, z: -(lh + 30) }).box(3, 4, 0.1, P.white, { x: -40, y: 2, z: -(lh + 25.95) });
+    // ferris wheel in the distance
+    var fx = 150, fz = -(lh + 60), fr = 14;
+    b.box(1, fr + 2, 1, P.steel, { x: fx - 3, y: (fr + 2) / 2, z: fz, rz: 0.2 }).box(1, fr + 2, 1, P.steel, { x: fx + 3, y: (fr + 2) / 2, z: fz, rz: -0.2 });
+    for (var sp = 0; sp < 12; sp++) {
+      var a = sp / 12 * Math.PI * 2;
+      b.box(0.25, fr, 0.25, P.white, { x: fx + Math.cos(a) * fr / 2, y: fr + 2 + Math.sin(a) * fr / 2, z: fz, rz: a + Math.PI / 2 });
+      b.box(1.4, 1.2, 1.2, [P.red, P.yellow, P.blue, P.green][sp % 4], { x: fx + Math.cos(a) * fr, y: fr + 1.4 + Math.sin(a) * fr, z: fz });
+    }
+    g.add(b.mesh({ shadow: false, receive: true }));
+    ctx.crowd = K.crowd(ctx, seats, { max: 720, maxLow: 280 });
+    // banners on the far fence
+    var names = ['IRONHORSE TRACTOR CO.', 'BIG SKY TRUCKS', 'RED ROOSTER AG', 'THUNDERBOLT DIESEL', 'PRAIRIE KING', 'COUNTY CO-OP FEED'];
+    for (var n = 0; n < 6; n++) K.banner(ctx, names[n], -8 + n * 20, 0.85, -(lh + 10.55), 5.5, 0.9, { bg: ['#b8322a', '#17140f', '#2565ae', '#17140f', '#2e7d32', '#ff7a1a'][n], fg: n % 2 ? '#ffd23f' : '#fff4dc' });
+    // hay bales by the start & finish, trees all around
+    var hay = [];
+    for (var hb = 0; hb < 8; hb++) hay.push({ x: -14 + (hb % 4) * 1.3, z: -(lh + 4) - Math.floor(hb / 4) * 1.4, ry: 0 });
+    for (var hb2 = 0; hb2 < 6; hb2++) hay.push({ x: L + 12 + hb2 * 1.3, z: (hb2 % 2 ? 1 : -1) * (lh + 3.5), ry: 0 });
+    K.hay(ctx, hay);
+    var trees = [], rng = ctx.rng;
+    for (var t = 0; t < 70; t++) { var tx = rng.range(-120, 230), side = rng() < 0.5 ? -1 : 1, tz = side * rng.range(lh + 34, lh + 120); trees.push({ x: tx, z: tz, s: rng.range(1.2, 2.4) }); }
+    K.trees(ctx, trees);
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * 17. CAMERA  TP.cam — presets + spectate director + full-pull orbit
+ * ------------------------------------------------------------------------- */
+var CAM = TP.cam = {
+  mode: 'side', director: false, rig: null, shake: 0, _dirT: 0, _cut: true, orbitT: 0, fovBase: 46,
+  order: ['side', 'chase', 'front', 'sled', 'onboard', 'crowd'],
+  names: { side: 'Side', chase: 'Chase', front: 'Front low', sled: 'Sled cam', onboard: 'Onboard', crowd: 'Crowd', orbit: 'Orbit', menu: 'Showcase' },
+  pos: null, look: null, _p: null, _l: null,
+  /** Preset functions: presets[name](rig, outPos, outLook). Add your own; they appear in the camera cycle if pushed to TP.cam.order. */
+  presets: {
+    side: function (r, P, L) { var por = TP.portrait, cx = r.x - (por ? 4.2 : 2.6), far = por ? 23 : 13.5; P.set(cx - 1.5, por ? 5.5 : 2.9, far); L.set(cx, por ? 2.2 : 1.3, 0); },
+    chase: function (r, P, L) { P.set(r.sledX - 15, 7.5, 3.5 + r.z * 0.5); L.set(r.x + 6, 0.6, r.z); },
+    front: function (r, P, L) { P.set(r.x + r.len + 5.5, 0.55, 3.6 + r.z); L.set(r.x + 0.5, 1.5 + r.lift * 3, r.z); },
+    sled: function (r, P, L) { P.set(r.sledX - 1.0, 2.5, 1.5 + r.sledZ); L.set(r.x + 2.5, 1.1, r.z); },
+    onboard: function (r, P, L) { P.set(r.x + r.seatX, r.seatY + 0.35 + r.lift * 2, r.z - 0.35); L.set(r.x + 25, 0.9, r.z * 0.3); },
+    crowd: function (r, P, L) { var lh = TP.venueState ? TP.venueState.track.laneHalf : 4.6; P.set(r.x - 6, 8.5, -(lh + 17)); L.set(r.x - 2, 1, 0); },
+    orbit: function (r, P, L) { var a = CAM.orbitT * 0.45 + 1.2, R = 11; P.set(r.x + Math.cos(a) * R, 2.6 + Math.sin(CAM.orbitT * 0.3) * 0.8, r.z + Math.sin(a) * R - 1); L.set(r.x + 1, 1.4, r.z); },
+    menu: function (r, P, L) {
+      var a = TP.time * 0.1 + 0.9, R = TP.portrait ? 13 : 10.5, cx = r.x + 1.4;
+      P.set(cx + Math.cos(a) * R, TP.portrait ? 3.6 : 2.4, Math.sin(a) * R);
+      // look a little to the camera's left so the rig sits right of the menu column (landscape) / above it (portrait)
+      var fx = -Math.cos(a), fz = -Math.sin(a), k = TP.portrait ? 0 : 3.4;
+      L.set(cx + fz * k, TP.portrait ? -2.6 : 1.1, -fx * k);
+    }
+  },
+  set: function (mode, cut) { if (!CAM.presets[mode]) return; if (mode !== CAM.mode) { CAM.mode = mode; CAM._cut = cut !== false; TP.emit('camera', mode); } },
+  cycle: function () { var i = CAM.order.indexOf(CAM.mode); CAM.set(CAM.order[(i + 1) % CAM.order.length]); return CAM.mode; },
+  follow: function (rig) { CAM.rig = rig; CAM._cut = true; },
+  update: function (realDt, dt) {
+    var r = CAM.rig; if (!r || !TP.camera) return;
+    if (!CAM.pos) { CAM.pos = new THREE.Vector3(); CAM.look = new THREE.Vector3(); CAM._p = new THREE.Vector3(); CAM._l = new THREE.Vector3(); }
+    if (CAM.mode === 'orbit') CAM.orbitT += realDt;
+    if (CAM.director && CAM.mode !== 'orbit') {
+      CAM._dirT -= dt;
+      if (CAM._dirT <= 0) {
+        var pool = ['side', 'side', 'front', 'chase', 'sled', 'crowd', 'onboard'];
+        var next = pool[(Math.random() * pool.length) | 0];
+        if (next === CAM.mode) next = 'side';
+        CAM.set(next); CAM._dirT = 2.8 + Math.random() * 2.6;
+      }
+    }
+    CAM.presets[CAM.mode](r, CAM._p, CAM._l);
+    if (CAM._cut) { CAM.pos.copy(CAM._p); CAM.look.copy(CAM._l); CAM._cut = false; }
+    else {
+      var k = 1 - Math.exp(-(CAM.mode === 'onboard' ? 30 : 7) * realDt);
+      CAM.pos.lerp(CAM._p, k); CAM.look.lerp(CAM._l, Math.min(1, k * 1.4));
+    }
+    var cam = TP.camera; cam.position.copy(CAM.pos);
+    var sh = TP.save.settings.shake === false ? 0 : CAM.shake;
+    if (sh > 0.001) { var t = TP.time * 31; cam.position.x += Math.sin(t) * sh * 0.06; cam.position.y += Math.sin(t * 1.37 + 1) * sh * 0.05; cam.position.z += Math.sin(t * 0.83 + 2) * sh * 0.04; }
+    cam.lookAt(CAM.look);
+    var fov = CAM.mode === 'onboard' ? 62 : (TP.portrait ? 58 : CAM.fovBase);
+    if (Math.abs(cam.fov - fov) > 0.01) { cam.fov = fov; cam.updateProjectionMatrix(); if (TP.fx) TP.fx._resize(); }
+    CAM.shake = Math.max(0, CAM.shake - realDt * 2);
+    // keep the sun's shadow box on the action
+    var sun = TP.lights && TP.lights.sun;
+    if (sun) { var sd = TP.lights.sunDir; sun.target.position.set(r.x - 3, 0, r.z); sun.position.set(r.x - 3 + sd.x * 60, sd.y * 60, r.z + sd.z * 60); }
+  }
+};
+
+/* ---------------------------------------------------------------------------
+ * 18. PULL RENDERING  TP.runPull(opts) -> Promise<result>
+ * ------------------------------------------------------------------------- */
+TP.controllers.player = {
+  kind: 'player', name: 'player',
+  update: function (p, dt, out) {
+    out.throttle = IN.throttle; out.steer = IN.steer; out.shift = IN.consumeShift(); out.boost = IN.consumeBoost();
+    var st = TP.save.settings;
+    if (st.autoShift && p.status !== 'staged' && p.gear < p.stats.gears.length - 1 && p.shiftTimer <= 0 && p.rpm >= p.stats.shiftRpm) out.shift = !this._as;
+    this._as = !!(st.autoShift && out.shift);
+    if (st.assistTraction && p.status !== 'staged' && p.chainTaut) out.throttle = Math.min(out.throttle, TP.sim.pedalFor(p, p.idealSlip * 1.2) + 0.08);
+    return out;
+  }
+};
+/** Resolve a controller: 'player' | 'ai' (uses opts.skill) | skill name | controller object. */
+TP.controllers.resolve = function (c, skill, name) {
+  if (c && typeof c === 'object' && c.update) return c;
+  if (c === 'player') return TP.controllers.player;
+  if (c === 'autoplay') { var a = TP.controllers.ai(skill || 'pro', { name: 'autoplay' }); a.kind = 'player'; return a; }
+  return TP.controllers.ai(skill || (typeof c === 'string' && TP.skills[c] ? c : 'good'), { name: name || 'ai' });
+};
+
+/** Build a renderable vehicle rig (no sim). Returns {group, pitch, model, ...}. */
+TP.buildRig = function (vehicleId, livery) {
+  var veh = TP.vehicles[vehicleId];
+  var model;
+  try { model = veh.build.call(veh, livery || {}); } catch (e) { console.error('[TP] vehicle build failed', vehicleId, e); model = MD.pickup(livery, veh); }
+  var Rr = (model.radius && model.radius.rear) || (model.wheels.rear[0] && model.wheels.rear[0].position.y) || 0.6;
+  var Rf = (model.radius && model.radius.front) || (model.wheels.front[0] && model.wheels.front[0].position.y) || Rr;
+  var group = new THREE.Group(), pitch = new THREE.Group();
+  pitch.position.y = Rr; model.root.position.y = -Rr; pitch.add(model.root); group.add(pitch);
+  group.traverse(function (o) { if (o.isMesh && TP.quality === 'high' && !o.material.transparent) o.castShadow = true; });
+  var hitchX = model.hitch ? model.hitch.position.x : -1.5;
+  var frontX = 0; model.wheels.front.forEach(function (w) { frontX = Math.max(frontX, w.position.x); });
+  var rig = {
+    group: group, pitch: pitch, model: model, vehicleId: vehicleId, veh: veh, Rr: Rr, Rf: Rf, hitchX: hitchX, frontX: frontX,
+    len: model.length || (frontX + 2), seatX: veh.seatX != null ? veh.seatX : (TP.classes[veh.class] && TP.classes[veh.class].group === 'tractor' ? -0.4 : 1.6), seatY: veh.seatY || (Rr * 2 + 0.6),
+    x: 0, z: 0, sledX: 0, sledZ: 0, lift: 0, rotF: 0, rotR: 0, smokeAcc: [], flameAcc: 0, dirtAcc: 0, dustAcc: 0
+  };
+  model.stacks.forEach(function () { rig.smokeAcc.push(0); });
+  return rig;
+};
+TP.disposeRig = function (rig) {
+  if (!rig) return;
+  if (rig.group.parent) rig.group.parent.remove(rig.group);
+  rig.group.traverse(function (o) { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.map) o.material.map.dispose(); });
+};
+var PR = TP.r3.pull = null;   // active pull render state
+function getSled() {
+  if (!R3.sled) {
+    R3.sled = MD.sled({});
+    R3.chain = [];
+    var cg = new THREE.CylinderGeometry(0.035, 0.035, 1, 5); cg.translate(0, 0.5, 0);
+    for (var i = 0; i < 2; i++) { var cm = new THREE.Mesh(cg, LP.mat(0x9aa0a6, { metal: 0.6, rough: 0.4 })); cm.castShadow = true; R3.chain.push(cm); }
+    R3.debris = [];
+    for (var d = 0; d < 6; d++) { var dm = LP.mesh(LP.box(0.25 + d * 0.04, 0.12, 0.2, d % 2 ? 0x8e979f : 0x2b2b2b)); dm.visible = false; R3.debris.push({ m: dm, v: new THREE.Vector3(), life: 0 }); }
+  }
+  [R3.sled.root].concat(R3.chain).forEach(function (o) { if (o.parent !== TP.scene) TP.scene.add(o); });
+  R3.debris.forEach(function (d) { if (d.m.parent !== TP.scene) TP.scene.add(d.m); });
+  return R3.sled;
+}
+TP.getSled = getSled;
+var _up = null;
+function placeChain(ax, ay, az, bx, by, bz, sag) {
+  var mx = (ax + bx) / 2, my = (ay + by) / 2 - sag, mz = (az + bz) / 2;
+  seg(R3.chain[0], ax, ay, az, mx, my, mz); seg(R3.chain[1], mx, my, mz, bx, by, bz);
+  function seg(m, x0, y0, z0, x1, y1, z1) {
+    var T = TP.tmp.v4; T.set(x1 - x0, y1 - y0, z1 - z0); var len = T.length() || 0.001;
+    m.position.set(x0, y0, z0); m.scale.set(1, len, 1);
+    if (!_up) _up = new THREE.Vector3(0, 1, 0);
+    m.quaternion.setFromUnitVectors(_up, T.multiplyScalar(1 / len));
+  }
+}
+/** Position the rig + sled from a pull state (also used for skip/snap and the menu showcase). */
+function poseRig(rig, p, dt) {
+  var st = p.stats;
+  var dist = p.visDist != null ? p.visDist : p.dist;
+  var hitchWorldX = p.travel - p.slack + 1.6;     // chain ~1.6 m when taut
+  rig.x = hitchWorldX - rig.hitchX;
+  rig.z = p.lateral;
+  rig.group.position.set(rig.x, 0, rig.z);
+  rig.group.rotation.y = -p.heading;
+  // front lift (wheelie) + hop bounce
+  var hopOsc = p.hop * Math.sin(p.hopPhase);
+  rig.lift = p.frontLift * 1.25 + clamp(1 - p.frontLoad, 0, 1) * 0.035 + Math.max(0, hopOsc) * 0.012;
+  rig.pitch.rotation.z = rig.lift;
+  rig.pitch.position.y = rig.Rr + Math.abs(hopOsc) * 0.05;
+  var body = rig.model.body;
+  if (body) { body.position.y = hopOsc * 0.03 + Math.sin(TP.time * 40) * 0.004 * p.throttle; body.rotation.x = Math.sin(p.hopPhase * 0.5) * p.hop * 0.012; }
+  // wheels
+  rig.rotR -= p.w * dt / rig.Rr;
+  rig.rotF -= (st.drive === '4wd' ? p.w : p.speed) * dt / rig.Rf;
+  var wr = rig.model.wheels;
+  for (var i = 0; i < wr.rear.length; i++) wr.rear[i].rotation.z = rig.rotR;
+  for (var j = 0; j < wr.front.length; j++) { wr.front[j].rotation.z = rig.rotF; wr.front[j].rotation.y = p.steer * 0.32; }
+  // sled
+  var S = R3.sled;
+  if (S) {
+    rig.sledX = dist; rig.sledZ = damp(rig.sledZ, p.lateral * 0.8, 1.5, dt);
+    S.root.position.set(dist, 0, rig.sledZ);
+    S.root.rotation.y = Math.atan2(-(rig.z - rig.sledZ), Math.max(1, rig.x - dist)) * 0.5;
+    S.box.position.x = lerp(S.boxRear, S.boxFront, p.sledBoxPos);
+    S.root.rotation.z = -0.012 * p.dig;
+    var sw = (p.chainTaut ? p.speed : 0) * dt / 0.62;
+    for (var k = 0; k < S.wheels.length; k++) S.wheels[k].rotation.z -= sw;
+    // chain from the hitch to the sled hook
+    var hx = rig.x + rig.hitchX * Math.cos(p.heading), hz = rig.z - rig.hitchX * Math.sin(p.heading);
+    var hy = rig.model.hitch ? rig.model.hitch.position.y + Math.sin(rig.lift) * -rig.hitchX * 0 : 0.6;
+    var slackLeft = p.chainTaut ? 0 : Math.max(0, p.slack - p.travel);
+    placeChain(hx, hy, hz, dist + 0.05, 0.5, rig.sledZ, 0.05 + slackLeft * 0.9);
+  }
+}
+TP.poseRig = poseRig;
+
+var QF = function () { return TP.quality === 'low' ? 0.5 : 1; };
+function rigEffects(rig, p, dt) {
+  if (dt <= 0) return;
+  var st = p.stats, et = st.et, FX = TP.fx, v = TP.tmp.v1, q = QF();
+  var rpmN = clamp(p.rpm / st.redline, 0, 1.1);
+  var load = clamp(p.driveForce / (p.fullDrive || 1), 0, 1);
+  var running = !p.broken;
+  // stack smoke + flames
+  var stacks = rig.model.stacks, n = stacks.length || 1;
+  for (var i = 0; i < stacks.length; i++) {
+    stacks[i].getWorldPosition(v);
+    var rate = running ? (5 + 70 * p.throttle * (0.3 + load) * (0.4 + rpmN)) * (et.smoke || 0.5) * q / Math.sqrt(n) : 3;
+    if (p.boostTimer > 0) rate *= 1.6;
+    rig.smokeAcc[i] += rate * dt;
+    while (rig.smokeAcc[i] >= 1) {
+      rig.smokeAcc[i] -= 1;
+      var up = 3 + 6 * p.throttle;
+      FX.emit('smoke', v.x, v.y, v.z, -p.speed * 0.4 + (Math.random() - 0.5) * 0.8, up * (0.7 + Math.random() * 0.5), (Math.random() - 0.5) * 0.8, (0.6 + 0.9 * p.throttle) / Math.sqrt(n) * (et.smoke < 0.5 ? 0.7 : 1), 1);
+    }
+    var flameOn = running && ((rpmN > 0.86 && p.throttle > 0.85 && Math.random() < et.flame) || p.boostTimer > 0 && Math.random() < 0.7 || (p._popT > 0));
+    if (flameOn) {
+      for (var f = 0; f < 2; f++) FX.emit('flame', v.x, v.y + 0.05, v.z, (Math.random() - 0.5) * 0.6, 4 + Math.random() * 4, (Math.random() - 0.5) * 0.6, 0.7 + (et.flame || 0.3) * 0.8, 1);
+    }
+  }
+  if (p._popT > 0) p._popT -= dt;
+  // roost: dirt off the drive tires
+  var slipV = Math.max(0, p.w - p.speed);
+  var wheels = rig.model.wheels.rear;
+  rig.dirtAcc += (slipV * 26 + p.speed * 4) * q * dt * (p.status === 'staged' ? 0 : 1);
+  while (rig.dirtAcc >= 1) {
+    rig.dirtAcc -= 1;
+    var wh = wheels[(Math.random() * wheels.length) | 0];
+    if (!wh) break;
+    wh.getWorldPosition(v);
+    var sp = 2 + slipV * 1.2;
+    FX.emit('dirt', v.x - rig.Rr * 0.7, 0.15, v.z + (Math.random() - 0.5) * 0.4, -sp * (0.6 + Math.random() * 0.6), sp * (0.4 + Math.random() * 0.8), (Math.random() - 0.5) * 2.4, 1 + Math.random(), 1);
+    if (Math.random() < 0.35) FX.emit('dust', v.x - rig.Rr, 0.3, v.z, -sp * 0.3, 0.6 + Math.random(), (Math.random() - 0.5) * 1.5, 0.8 + slipV * 0.1, 1);
+  }
+  // sled pan: dust + dirt pile as it digs
+  if (p.chainTaut && R3.sled) {
+    rig.dustAcc += (p.speed * 3 + p.dig * 10) * q * dt;
+    while (rig.dustAcc >= 1) {
+      rig.dustAcc -= 1;
+      var px = rig.sledX - 0.3, pz = rig.sledZ + (Math.random() - 0.5) * 2.4;
+      FX.emit('dust', px, 0.3, pz, p.speed * 0.6, 0.4 + Math.random() * 0.8, (Math.random() - 0.5) * 2, 0.9 + p.dig * 0.6, 1);
+      if (Math.random() < 0.3 + p.dig) FX.emit('dirt', px + 0.3, 0.2, pz, p.speed * 0.8 + 0.5, 1 + Math.random() * 1.5, (Math.random() - 0.5) * 2, 0.9, 0.8);
+    }
+  }
+  // overheating: steam from the grille
+  if (p.temp > 0.85 && Math.random() < (p.temp - 0.85) * 8 * dt * 30 * q) {
+    rig.group.getWorldPosition(v);
+    FX.emit('steam', v.x + rig.frontX * 0.9, 1.6, v.z, 0.5, 1.5, (Math.random() - 0.5), 1, 1);
+  }
+}
+TP.rigEffects = rigEffects;
+function blowUp(rig, p) {
+  var v = TP.tmp.v2; rig.group.getWorldPosition(v);
+  var x = v.x + (p.broken === 'engine' ? rig.frontX * 0.6 : 0), y = 1.4, z = v.z;
+  TP.fx.burst('flame', x, y, z, 40, { spread: 0.8, speed: 4, up: 1.5, sizeMul: 2 });
+  TP.fx.burst('smoke', x, y + 0.5, z, 40, { spread: 1, speed: 2.5, up: 2, sizeMul: 1.8 });
+  TP.fx.burst('spark', x, y, z, 50, { spread: 0.4, speed: 7, up: 1.2 });
+  R3.debris.forEach(function (d, i) { d.m.visible = true; d.m.position.set(x, y, z); d.v.set((Math.random() - 0.3) * 5, 5 + Math.random() * 4, (Math.random() - 0.5) * 6); d.life = 3; });
+  AU.sfx('bang'); CAM.shake = 2.5; TP.cheer(0.6);
+}
+TP.onFrame(function (dt) {
+  if (!R3.debris) return;
+  for (var i = 0; i < R3.debris.length; i++) {
+    var d = R3.debris[i]; if (d.life <= 0) continue;
+    d.life -= dt; d.v.y -= 9.8 * dt; d.m.position.addScaledVector(d.v, dt);
+    if (d.m.position.y < 0.08) { d.m.position.y = 0.08; d.v.y *= -0.45; d.v.x *= 0.6; d.v.z *= 0.6; }
+    d.m.rotation.x += dt * 8; d.m.rotation.z += dt * 6;
+    if (d.life <= 0) d.m.visible = false;
+  }
+});
+
+/** Announcer line for a driver: TP.driverLine(driverId, kind) kind = intro|good|full|bad */
+TP.driverLine = function (driverId, kind) {
+  var d = TP.drivers[driverId]; if (!d || !d.lines || !d.lines[kind] || !d.lines[kind].length) return '';
+  var a = d.lines[kind]; return a[(Math.random() * a.length) | 0];
+};
+
+/**
+ * Render a pull in the current venue. opts:
+ *  {vehicleId, upgrades, livery, driverId, name, controller:'player'|'ai'|'autoplay'|controllerObj, skill,
+ *   venue, trackCondition, seed, sledMult, sled, spectate:bool, best (ft to beat), label, classId, extra}
+ * Resolves with the result (+ {player, driverId, name, vehicleId}).
+ */
+TP.runPull = function (opts) {
+  opts = opts || {};
+  return new Promise(function (resolve) {
+    if (PR) endActive(true);
+    var veh = TP.vehicles[opts.vehicleId];
+    if (!veh) { console.error('[TP] runPull: unknown vehicle', opts.vehicleId); resolve(null); return; }
+    var venueId = opts.venue || (TP.venueState && TP.venueState.id) || 'county_fair';
+    var vs = TP.loadVenue(venueId, { trackCondition: opts.trackCondition });
+    var isPlayer = opts.controller === 'player' || opts.controller === 'autoplay' || (opts.controller && opts.controller.kind === 'player') || (!opts.controller && !opts.spectate);
+    var ctrl = TP.controllers.resolve(opts.controller || (isPlayer ? 'player' : 'ai'), opts.skill || (opts.driverId && TP.drivers[opts.driverId] && TP.drivers[opts.driverId].skill), opts.driverId);
+    var p = TP.sim.createPull({ vehicleId: opts.vehicleId, upgrades: opts.upgrades, driver: opts.driverId, venue: venueId, trackCondition: vs.trackCondition,
+      seed: opts.seed, sledMult: opts.sledMult, sled: opts.sled, extra: opts.extra, classId: opts.classId });
+    p.player = isPlayer; p.name = opts.name || (opts.driverId && TP.drivers[opts.driverId] ? TP.drivers[opts.driverId].name : 'You'); p.label = opts.label || '';
+    hideMenuShowcase();
+    var sled = getSled();
+    var rig = TP.buildRig(opts.vehicleId, opts.livery);
+    TP.scene.add(rig.group);
+    TP.fx.clear();
+    IN.reset();
+    var state = PR = TP.r3.pull = {
+      p: p, rig: rig, ctrl: ctrl, input: { throttle: 0, steer: 0, shift: false, boost: false }, opts: opts, resolve: resolve,
+      ff: 1, evIdx: 0, endT: -1, voice: AU.engine(veh.engine), player: isPlayer, spectate: !isPlayer, slowT: 0, lastBoard: -1, milestone: 0,
+      best: opts.best != null ? opts.best : (TP.save.stats.bestByClass[p.classId] || 0)
+    };
+    poseRig(rig, p, 0);
+    CAM.follow(rig); CAM.director = !isPlayer; CAM.set(isPlayer ? (TP.save.settings.camera || 'side') : 'side'); CAM._dirT = 3; CAM.orbitT = 0;
+    TP.timeScale = 1; TP.paused = false;
+    AU.crowd(0.35);
+    TP.ui.hud.show(state);
+    var intro = opts.driverId ? TP.driverLine(opts.driverId, 'intro') : '';
+    TP.ui.announcer(intro || ('Next up, ' + p.name + ' in the ' + veh.name + '!'), { priority: 2 });
+    TP.emit('pullStart', p);
+    R3.pullUpdate = function (dt, realDt) { pullFrame(state, dt, realDt); };
+  });
+};
+function pullFrame(S, dt, realDt) {
+  var p = S.p, rig = S.rig;
+  if (S.slowT > 0) { S.slowT -= realDt; if (S.slowT <= 0) TP.timeScale = 1; }
+  var simDt = dt * S.ff;
+  if (!p.done) {
+    if (simDt > 0) {
+      S.ctrl.update(p, simDt, S.input);
+      TP.sim.step(p, simDt, S.input);
+    }
+  } else if (simDt > 0) TP.sim.coast(p, simDt);
+  processEvents(S);
+  if (p.done && S.endT < 0) onDone(S);
+  poseRig(rig, p, simDt);
+  rigEffects(rig, p, simDt);
+  // audio
+  var st = p.stats;
+  S.voice.update(clamp((p.rpm - st.idle * 0.6) / (st.redline - st.idle * 0.6), 0, 1.1), p.broken ? 0 : p.throttle, 0, p.spool + (p.boostTimer > 0 ? 0.4 : 0), { limiter: p.limiter });
+  AU.crowd(0.3 + 0.4 * p.sledBoxPos);
+  CAM.shake = Math.max(CAM.shake, p.throttle * 0.25 * clamp(p.rpm / st.redline, 0, 1) + p.hop * 0.6);
+  // live board + milestones
+  var ft = (p.visDist != null ? p.visDist : p.dist) / C.FT;
+  if (Math.abs(ft - S.lastBoard) >= 0.25 || (p.done && S.lastBoard !== ft)) { S.lastBoard = ft; if (TP.venueState && TP.venueState.board) TP.venueState.board.set(ft.toFixed(2), p.name.toUpperCase()); }
+  if (!p.done && ft >= S.milestone + 50) { S.milestone += 50; if (S.milestone >= 150) { TP.ui.announcer(S.milestone + ' feet and still going!', { priority: 0 }); TP.cheer(0.25 + S.milestone / 600); } }
+  // start tree
+  var L = TP.venueState && TP.venueState.startLights;
+  if (L) { var lt = p.status === 'staged' ? p.light : 'green'; for (var i = 0; i < 3; i++) { var on = ['red', 'yellow', 'green'][i] === lt; L[i].material.emissive.setHex(on ? [0xff2010, 0xffc000, 0x20ff40][i] : 0); L[i].material.color.setHex(on ? 0xffffff : 0x222222); } }
+  TP.ui.hud.update(S, dt);
+  TP.emit('pullUpdate', p, simDt);
+  if (S.endT >= 0) {
+    S.endT -= realDt * (S.ff > 1 ? 2 : 1);
+    if (S.endT <= 0) finishPull(S);
+  }
+}
+function processEvents(S) {
+  var p = S.p, ev = p.events;
+  while (S.evIdx < ev.length) {
+    var e = ev[S.evIdx++];
+    switch (e.type) {
+      case 'launch':
+        TP.emit('launch', p, e.data);
+        AU.sfx('go');
+        if (S.player) TP.ui.numberPop(({ perfect: 'PERFECT LAUNCH!', good: 'GOOD LAUNCH', late: 'LATE LAUNCH', early: 'JUMPED IT!' })[e.data], e.data === 'perfect' ? 'good' : (e.data === 'good' ? '' : 'bad'));
+        if (e.data === 'perfect') TP.cheer(0.4);
+        break;
+      case 'shift': TP.emit('shift', p, e.data.gear); AU.sfx('shift'); p._popT = 0.18; if (S.player && e.data.quality === 'perfect') TP.ui.numberPop('PERFECT SHIFT', 'good'); if (S.player && e.data.quality === 'early') TP.ui.numberPop('EARLY SHIFT', 'bad'); break;
+      case 'boost': TP.emit('boost', p); AU.sfx('whoosh'); CAM.shake = 1.2; if (S.player) TP.ui.numberPop('BOOST!', 'good'); break;
+      case 'hop': TP.emit('hop', p); if (p.hop > 0.75) TP.ui.announcer(['She\'s HOPPING!', 'Wheel hop! Ease off!', 'Bouncing like a bronco!'][(Math.random() * 3) | 0], { priority: 1 }); break;
+      case 'hook': AU.sfx('hook'); break;
+      case 'breakdown': TP.emit('breakdown', p, e.data); blowUp(S.rig, p); TP.ui.announcer(e.data === 'engine' ? 'KABOOM! That engine is done for the day!' : 'Something in the driveline let go!', { priority: 3 }); break;
+      case 'outOfBounds': TP.emit('outOfBounds', p); AU.sfx('horn'); TP.ui.announcer('Over the line! That is a disqualification.', { priority: 3 }); break;
+    }
+  }
+}
+function onDone(S) {
+  var p = S.p, r = p.result;
+  S.endT = p.status === 'fullPull' ? 4.5 : 2.6;
+  if (p.status === 'fullPull') {
+    TP.emit('fullPull', p);
+    TP.timeScale = 0.35; S.slowT = 1.6; CAM.set('orbit'); CAM.orbitT = 0;
+    TP.cheer(1.3); AU.sfx('horn');
+    var v = TP.tmp.v3; S.rig.group.getWorldPosition(v);
+    TP.fx.burst('confetti', v.x, 6, v.z, 120, { spread: 8, speed: 2, up: 0.3, colors: [0xffd23f, 0xff6a1a, 0x2565ae, 0xd23a2a, 0xf3efe6, 0x2e8b3d] });
+    TP.ui.banner('FULL PULL!', p.name + ' — ' + p.trackLengthFt + ' ft', { kind: 'full' });
+    TP.ui.announcer((p.driverId && TP.driverLine(p.driverId, 'full')) || 'FULL PULL! Listen to this crowd!', { priority: 3 });
+  } else {
+    var good = r.distanceFt >= S.best && S.best > 0 && !r.dq;
+    if (r.dq) TP.ui.banner('DISQUALIFIED', 'Out of bounds', { kind: 'bad' });
+    else TP.ui.banner(r.distanceText + ' ft', r.reason + (good ? ' — NEW BEST!' : ''), { kind: good ? 'good' : '' });
+    if (!r.dq) TP.cheer(clamp(r.distanceFt / p.trackLengthFt, 0.1, 1) * 0.8);
+    var line = p.driverId ? TP.driverLine(p.driverId, r.distanceFt / p.trackLengthFt > 0.85 ? 'good' : 'bad') : '';
+    TP.ui.announcer(line || (r.distanceText + ' feet for ' + p.name + '!'), { priority: 2 });
+  }
+}
+function finishPull(S) {
+  var p = S.p, res = shallow(p.result);
+  res.player = S.player; res.name = p.name; res.vehicleId = p.vehicleId; res.driverId = p.driverId; res.label = p.label;
+  endActive(false);
+  TP.emit('pullEnd', res);
+  S.resolve(res);
+}
+function endActive(aborted) {
+  var S = PR; if (!S) return;
+  R3.pullUpdate = null; PR = TP.r3.pull = null;
+  try { S.voice.stop(); } catch (e) {}
+  TP.timeScale = 1; TP.paused = false; CAM.director = false;
+  TP.ui.hud.hide();
+  TP.disposeRig(S.rig);
+  IN.reset();
+  if (aborted && S.resolve) { var r = S.p.result || makeResult(S.p); r = shallow(r); r.aborted = true; r.player = S.player; r.name = S.p.name; S.resolve(r); }
+}
+/** Abort the active pull (resolves its promise with {aborted:true}). */
+TP.abortPull = function () { endActive(true); };
+TP.activePull = function () { return PR ? PR.p : null; };
+/** Spectate fast-forward factor (1, 2, 4). */
+TP.setFastForward = function (x) { if (PR) PR.ff = clamp(+x || 1, 0.25, 8); return PR ? PR.ff : 1; };
+/** Skip: finish the active pull instantly via TP.sim and show the end. */
+TP.skipPull = function () {
+  if (!PR) return;
+  var p = PR.p;
+  if (!p.done) TP.sim.finish(p, PR.ctrl);
+  p.visDist = p.dist;
+  processEvents(PR);
+  if (PR.endT < 0) { onDone(PR); }
+  PR.endT = Math.min(PR.endT, 1.2); TP.timeScale = 1; PR.slowT = 0;
+};
+
+/* Menu showcase: a parked vehicle + sled in the venue behind the menus */
+var SHOW = null;
+TP.menuShowcase = function (vehicleId, livery) {
+  hideMenuShowcase();
+  if (!TP.venueState) TP.loadVenue('county_fair');
+  vehicleId = vehicleId || (TP.garage.selected() && TP.garage.selected().vehicleId) || 'sd_thunderbolt';
+  if (!TP.vehicles[vehicleId]) return;
+  getSled();
+  var rig = TP.buildRig(vehicleId, livery);
+  TP.scene.add(rig.group);
+  var fake = TP.sim.createPull({ vehicleId: vehicleId, seed: 1 });
+  fake.travel = fake.slack; fake.dist = 0; fake.chainTaut = true;
+  poseRig(rig, fake, 0);
+  SHOW = { rig: rig, p: fake, acc: [] };
+  CAM.follow(rig); CAM.set('menu');
+  SHOW.voiceT = 0;
+};
+function hideMenuShowcase() { if (SHOW) { TP.disposeRig(SHOW.rig); SHOW = null; } }
+TP.hideMenuShowcase = hideMenuShowcase;
+TP.onFrame(function (dt) {
+  if (!SHOW || R3.pullUpdate) return;
+  var p = SHOW.p; p.throttle = 0.12 + 0.1 * Math.max(0, Math.sin(TP.time * 1.3)); p.rpm = p.stats.idle * (1 + p.throttle);
+  rigEffects(SHOW.rig, p, dt * 0.6);
+});
+
+/* ---------------------------------------------------------------------------
+ * 19. UI  TP.ui — screens, toasts, banners, announcer, HUD, menu buttons
+ * ------------------------------------------------------------------------- */
+var UI = TP.ui = { current: null, stack: [], menuItems: [], icons: {} };
+function $(id) { return document.getElementById(id); }
+UI.$ = $;
+/** Inject CSS text (features use this for their own styles). Returns the <style>. */
+UI.css = function (text) { var s = document.createElement('style'); s.textContent = text; document.head.appendChild(s); return s; };
+/** Inline SVG icons (24x24, currentColor). Add with TP.ui.icons.name = '<path .../>'. */
+UI.icons = {
+  play: '<path d="M7 4l13 8-13 8z"/>',
+  trophy: '<path d="M7 3h10v3h3v3a5 5 0 0 1-5 5 5 5 0 0 1-2 1.6V18h3v3H8v-3h3v-2.4A5 5 0 0 1 9 14a5 5 0 0 1-5-5V6h3zm-1 5v1a3 3 0 0 0 1.5 2.6V8zm11 0v3.6A3 3 0 0 0 18.5 9V8z"/>',
+  eye: '<path d="M12 5c5 0 9 4.5 10 7-1 2.5-5 7-10 7S3 14.5 2 12c1-2.5 5-7 10-7zm0 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0 2.2a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6z"/>',
+  wrench: '<path d="M21 6.5a5.5 5.5 0 0 1-7.4 5.2L6.4 19a2 2 0 0 1-2.8-2.8l7.3-7.2A5.5 5.5 0 0 1 17.5 1.5L14 5l1 3 3 1z"/>',
+  cart: '<path d="M3 3h3l2.5 11h10l2-8H7.2M9 21a1.6 1.6 0 1 0 0-.1zm9 0a1.6 1.6 0 1 0 0-.1z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>',
+  gear: '<path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7zM10.5 2h3l.5 2.6 2 .9 2.2-1.5 2.1 2.1-1.5 2.2.9 2 2.6.5v3l-2.6.5-.9 2 1.5 2.2-2.1 2.1-2.2-1.5-2 .9-.5 2.6h-3l-.5-2.6-2-.9-2.2 1.5-2.1-2.1 1.5-2.2-.9-2L2 13.5v-3l2.6-.5.9-2L4 5.8 6.1 3.7l2.2 1.5 2-.9z"/>',
+  back: '<path d="M15 4l-8 8 8 8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>',
+  pause: '<path d="M6 4h4v16H6zm8 0h4v16h-4z"/>',
+  cam: '<path d="M4 7h3l2-2h6l2 2h3v12H4zm8 3a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/>',
+  ff: '<path d="M3 5l9 7-9 7zm9 0l9 7-9 7z"/>',
+  skip: '<path d="M4 5l10 7-10 7zm12 0h3v14h-3z"/>',
+  flag: '<path d="M5 3v18H3V3zm2 0h13l-3 4.5L20 12H7z"/>',
+  bolt: '<path d="M13 2L4 14h6l-1 8 9-12h-6z"/>',
+  lock: '<path d="M7 10V7a5 5 0 0 1 10 0v3h2v11H5V10zm2 0h6V7a3 3 0 0 0-6 0z"/>',
+  sound: '<path d="M4 9h4l5-4v14l-5-4H4zm12.5-1.5a6 6 0 0 1 0 9M15 10a2.5 2.5 0 0 1 0 4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+  tractor: '<path d="M6 10h5V6h4l1 4h3a2 2 0 0 1 2 2v3h-2.2a3 3 0 0 0-5.6 0H10a4.5 4.5 0 0 0-8.6-1.5L3 10zm11.5 4.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM6 13a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7z"/>',
+  truck: '<path d="M2 7h11v8h1V9h4l4 4v4h-2a2.5 2.5 0 0 0-5 0H9a2.5 2.5 0 0 0-5 0H2zm4.5 8.5a1.6 1.6 0 1 1 0 3.2 1.6 1.6 0 0 1 0-3.2zm11 0a1.6 1.6 0 1 1 0 3.2 1.6 1.6 0 0 1 0-3.2z"/>'
+};
+/** <svg> markup for an icon name. */
+UI.icon = function (name, cls) { return '<svg class="ico ' + (cls || '') + '" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">' + (UI.icons[name] || UI.icons.flag) + '</svg>'; };
+/** Get/create a screen element <section class="screen" id="scr-ID">. If html is given, it replaces the content. */
+UI.screen = function (id, html) {
+  var el = $('scr-' + id);
+  if (!el) { el = document.createElement('section'); el.className = 'screen'; el.id = 'scr-' + id; el.setAttribute('data-screen', id); $('screens').appendChild(el); }
+  if (html != null) el.innerHTML = html;
+  return el;
+};
+/** Register a renderable screen: TP.ui.register(id, {render(el, args), onShow?, onHide?, back?:'menu'}). */
+UI.register = function (id, def) { TP.screens[id] = def; return def; };
+/** Show a screen (renders it if registered). Hides other screens. */
+UI.show = function (id, args) {
+  var def = TP.screens[id];
+  var el = UI.screen(id);
+  if (def && def.render) { try { def.render(el, args || {}); } catch (e) { console.error('[TP] screen render failed', id, e); } }
+  var all = document.querySelectorAll('#screens .screen');
+  for (var i = 0; i < all.length; i++) if (all[i] !== el) { if (all[i].classList.contains('on')) { var pid = all[i].getAttribute('data-screen'); if (TP.screens[pid] && TP.screens[pid].onHide) TP.screens[pid].onHide(); } all[i].classList.remove('on'); }
+  el.classList.add('on'); el.scrollTop = 0;
+  if (id !== 'menu') { UI._ann.q.length = 0; UI._ann.cur = null; var an = $('announcer'); if (an) an.classList.remove('on'); }
+  $('screens').classList.add('on');
+  if (UI.current && UI.current !== id) UI.stack.push(UI.current);
+  if (UI.stack.length > 20) UI.stack.shift();
+  UI.current = id;
+  if (def && def.onShow) def.onShow(el, args || {});
+  TP.emit('screen', id, args);
+  if (id === 'menu') TP.emit('menu');
+  return el;
+};
+UI.go = UI.show;
+/** Hide all screens (e.g. while pulling). */
+UI.hide = function (id) {
+  var all = document.querySelectorAll('#screens .screen.on');
+  for (var i = 0; i < all.length; i++) { var sid = all[i].getAttribute('data-screen'); if (id && sid !== id) continue; all[i].classList.remove('on'); if (TP.screens[sid] && TP.screens[sid].onHide) TP.screens[sid].onHide(); }
+  if (!document.querySelector('#screens .screen.on')) { $('screens').classList.remove('on'); UI.current = null; }
+};
+UI.back = function () { var prev = UI.stack.pop() || 'menu'; UI.current = null; UI.show(prev); };
+/** Chunky button element. o = {primary, icon, small, cls, disabled, sub} */
+UI.menuButton = function (label, fn, o) {
+  o = o || {};
+  var b = document.createElement('button');
+  b.className = 'btn' + (o.primary ? ' primary' : '') + (o.small ? ' small' : '') + (o.cls ? ' ' + o.cls : '');
+  b.innerHTML = (o.icon ? UI.icon(o.icon) : '') + '<span class="bl">' + esc(label) + (o.sub ? '<small>' + esc(o.sub) + '</small>' : '') + '</span>';
+  if (o.disabled) b.disabled = true;
+  b.addEventListener('click', function (e) { AU.init(); AU.sfx('click'); try { fn && fn(e); } catch (err) { console.error(err); } });
+  return b;
+};
+/** Standard screen header html: title + back button + cash/level chips. */
+UI.header = function (title, o) {
+  o = o || {};
+  return '<header class="scr-head">' + (o.back === false ? '' : '<button class="btn icon back" data-back aria-label="Back">' + UI.icon('back') + '</button>') +
+    '<h2>' + esc(title) + '</h2><div class="chips"><span class="chip cash">' + fmtCash(TP.save.cash) + '</span><span class="chip lvl">LVL ' + TP.save.level + '</span></div></header>';
+};
+/** Wire [data-back] and [data-go="screen"] inside a screen element. */
+UI.wire = function (el, handlers) {
+  el.onclick = function (e) {
+    var t = e.target.closest('[data-back],[data-go],[data-act]');
+    if (!t || !el.contains(t)) return;
+    AU.init();
+    if (t.hasAttribute('data-back')) { AU.sfx('click'); (handlers && handlers.back) ? handlers.back() : UI.back(); return; }
+    if (t.hasAttribute('data-go')) { AU.sfx('click'); UI.show(t.getAttribute('data-go')); return; }
+    var act = t.getAttribute('data-act');
+    if (handlers && handlers[act]) { AU.sfx('click'); handlers[act](t.getAttribute('data-id'), t, e); }
+  };
+};
+/** Small toast (bottom). kind: '' | 'good' | 'bad' */
+UI.toast = function (text, kind, ms) {
+  var host = $('toasts'); if (!host) return;
+  var t = document.createElement('div'); t.className = 'toast ' + (kind || ''); t.textContent = text;
+  host.appendChild(t);
+  setTimeout(function () { t.classList.add('out'); setTimeout(function () { t.remove(); }, 400); }, ms || 2400);
+};
+/** Big center banner. o = {kind:'full'|'good'|'bad', ms} */
+UI.banner = function (title, sub, o) {
+  o = o || {};
+  var b = $('banner'); if (!b) return;
+  b.className = 'on ' + (o.kind || '');
+  b.innerHTML = '<div class="bt">' + esc(title) + '</div>' + (sub ? '<div class="bs">' + esc(sub) + '</div>' : '');
+  clearTimeout(UI._bt); UI._bt = setTimeout(function () { b.className = ''; }, o.ms || 2600);
+};
+/** Announcer ticker (speech bubble). Higher priority replaces lower; equal queues. */
+UI._ann = { q: [], cur: null, t: 0 };
+UI.announcer = function (text, o) {
+  if (!text) return;
+  o = o || {}; var pr = o.priority || 0, A = UI._ann;
+  if (A.cur && pr > A.cur.pr) { A.q.length = 0; showAnn({ text: text, pr: pr }); return; }
+  if (!A.cur) { showAnn({ text: text, pr: pr }); return; }
+  if (A.q.length < 3) A.q.push({ text: text, pr: pr });
+  function showAnn(item) {
+    A.cur = item; A.t = clamp(1.6 + item.text.length * 0.045, 2, 4.5);
+    var el = $('announcer'); if (!el) return;
+    el.innerHTML = '<b>' + UI.icon('sound') + '</b><span>' + esc(item.text) + '</span>';
+    el.classList.remove('on'); void el.offsetWidth; el.classList.add('on');
+    if (item.pr >= 2) AU.sfx('chime', { volume: 0.5 });
+    TP.emit('announce', item.text, item.pr);
+  }
+  UI._showAnn = showAnn;
+};
+TP.onFrame(function (dt, realDt) {
+  var A = UI._ann; if (!A.cur) return;
+  A.t -= realDt;
+  if (A.t <= 0) { A.cur = null; if (A.q.length) UI._showAnn(A.q.shift()); else { var el = $('announcer'); if (el) el.classList.remove('on'); } }
+});
+/** Floating text pop near the center ("PERFECT SHIFT"). kind '' | 'good' | 'bad' */
+UI.numberPop = function (text, kind) {
+  var host = $('pops'); if (!host) return;
+  var d = document.createElement('div'); d.className = 'pop ' + (kind || ''); d.textContent = text;
+  host.appendChild(d); setTimeout(function () { d.remove(); }, 1300);
+};
+/** Main menu entries: {id, label, icon, primary, order, action()} — features may push/replace by id. */
+UI.addMenuItem = function (item) {
+  var i = UI.menuItems.findIndex(function (m) { return m.id === item.id; });
+  if (i >= 0) UI.menuItems[i] = item; else UI.menuItems.push(item);
+  UI.menuItems.sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+};
+UI.addMenuItem({ id: 'play', label: 'Quick Pull', sub: 'Pick a class, hook up, go', icon: 'play', primary: true, order: 10, action: function () { UI.show('quick'); } });
+UI.addMenuItem({ id: 'career', label: 'Career', sub: 'Fair season & points', icon: 'trophy', order: 20, action: function () { UI.show('career'); } });
+UI.addMenuItem({ id: 'watch', label: 'Watch', sub: 'Spectate AI pulls', icon: 'eye', order: 30, action: function () { UI.show('watch'); } });
+UI.addMenuItem({ id: 'garage', label: 'Garage', sub: 'Upgrades & paint', icon: 'wrench', order: 40, action: function () { UI.show('garage'); } });
+UI.addMenuItem({ id: 'shop', label: 'Shop', icon: 'cart', order: 50, action: function () { UI.show('shop'); } });
+UI.addMenuItem({ id: 'settings', label: 'Settings', icon: 'gear', order: 60, action: function () { UI.show('settings'); } });
+
+/* ---- HUD ---- */
+var HUD = UI.hud = {
+  el: null, on: false, _c: {}, _tachCtx: null,
+  /** Show the HUD for a pull render state (called by runPull). */
+  show: function (S) {
+    HUD.el = $('hud'); if (!HUD.el) return;
+    HUD.on = true; HUD._c = {};
+    HUD.el.classList.remove('hidden');
+    HUD.el.classList.toggle('spectate', !S.player);
+    var ctr = $('controls'); if (ctr) ctr.classList.toggle('hidden', !S.player);
+    $('btnPause').classList.remove('hidden'); $('btnCam').classList.remove('hidden');
+    var p = S.p, veh = TP.vehicles[p.vehicleId], cls = TP.classes[p.classId];
+    setTxt('h-name', p.name + ' · ' + veh.name);
+    setTxt('h-class', cls.name.toUpperCase());
+    $('h-best').style.left = clamp(S.best / p.trackLengthFt * 100, 0, 100) + '%';
+    $('h-best').style.display = S.best > 0 ? '' : 'none';
+    setTxt('h-besttxt', S.best > 0 ? 'TO BEAT ' + S.best.toFixed(2) : '');
+    var pips = $('h-boost'); pips.innerHTML = '';
+    for (var i = 0; i < p.stats.boostShots; i++) pips.appendChild(UI.$el('i'));
+    pips.parentNode.style.display = p.stats.boostShots ? '' : 'none';
+    var bb = $('btnBoost'); if (bb) bb.style.display = p.stats.boostShots ? '' : 'none';
+    var tc = $('tach'); HUD._tachCtx = tc ? tc.getContext('2d') : null;
+    HUD.setFF(1);
+    TP.emit('hudShow', S);
+  },
+  hide: function () { HUD.on = false; var h = $('hud'); if (h) h.classList.add('hidden'); var c = $('controls'); if (c) c.classList.add('hidden'); var bp = $('btnPause'); if (bp) bp.classList.add('hidden'); var bc = $('btnCam'); if (bc) bc.classList.add('hidden'); },
+  setFF: function (x) { var b = document.querySelectorAll('#h-spec [data-ff]'); for (var i = 0; i < b.length; i++) b[i].classList.toggle('on', +b[i].getAttribute('data-ff') === x); },
+  update: function (S, dt) {
+    if (!HUD.on) return;
+    var p = S.p, st = p.stats, c = HUD._c;
+    var ft = (p.visDist != null ? p.visDist : p.dist) / C.FT;
+    setTxtC('h-ft', ft.toFixed(2));
+    var prog = clamp(ft / p.trackLengthFt, 0, 1);
+    if (Math.abs((c.prog || 0) - prog) > 0.002) { c.prog = prog; $('h-prog').style.width = (prog * 100).toFixed(1) + '%'; }
+    setTxtC('h-gear', p.status === 'staged' ? 'N' : String(p.gear + 1));
+    setTxtC('h-mph', (p.speed * C.MPH).toFixed(1));
+    var shiftOn = p.gear < st.gears.length - 1 && p.rpm >= st.shiftRpm * 0.97 && p.status !== 'staged';
+    toggleC('h-shiftl', 'on', shiftOn); toggleC('btnShift', 'lit', shiftOn);
+    toggleC('h-shiftl', 'over', p.limiter);
+    // slip meter
+    var sr = p.status === 'staged' ? 0 : clamp(p.slip / (p.idealSlip * 2.6), 0, 1);
+    if (Math.abs((c.sr || 0) - sr) > 0.004) { c.sr = sr; $('h-slipm').style.left = (sr * 100).toFixed(1) + '%'; }
+    var zone = p.slip < p.idealSlip * 0.55 ? 'low' : (p.slip > p.idealSlip * 1.45 ? 'high' : 'ok');
+    if (p.status === 'staged') zone = 'idle';
+    if (c.zone !== zone) { c.zone = zone; $('h-slip').setAttribute('data-zone', zone); setTxt('h-sliptxt', ({ low: 'BOGGING', high: 'SPINNING', ok: 'HOOKED UP', idle: 'TRACTION' })[zone]); }
+    toggleC('h-hop', 'on', p.hop > 0.45);
+    // temp
+    var tp = clamp((p.temp - 0.2) / 0.8, 0, 1);
+    if (Math.abs((c.tp || 0) - tp) > 0.005) { c.tp = tp; $('h-tempf').style.width = (tp * 100).toFixed(0) + '%'; }
+    toggleC('h-temp', 'hot', p.temp > 0.88);
+    // boost pips
+    if (c.boost !== p.boostLeft + (p.boostTimer > 0 ? 100 : 0)) {
+      c.boost = p.boostLeft + (p.boostTimer > 0 ? 100 : 0);
+      var pp = $('h-boost').children; for (var i = 0; i < pp.length; i++) pp[i].className = i < p.boostLeft ? 'full' : '';
+      toggleC('h-boostw', 'live', p.boostTimer > 0); toggleC('btnBoost', 'empty', p.boostLeft <= 0);
+    }
+    // lane
+    var room = Math.max(0.3, p.laneHalf - p.halfWidth);
+    var ln = clamp(p.lateral / room, -1, 1);
+    if (Math.abs((c.ln || 0) - ln) > 0.005) { c.ln = ln; $('h-lanem').style.left = (50 + ln * 46).toFixed(1) + '%'; }
+    toggleC('h-lane', 'warn', Math.abs(ln) > 0.7);
+    // start tree
+    var tree = p.status === 'staged' ? p.light : (p.t - p.launchT < 1.2 && p.launchT >= 0 ? 'go' : 'off');
+    if (c.tree !== tree) {
+      c.tree = tree; var tr = $('h-tree'); tr.setAttribute('data-light', tree);
+      setTxt('h-treetxt', tree === 'red' ? 'STAGED' : tree === 'yellow' ? 'GET READY...' : tree === 'green' ? 'GO GO GO!' : tree === 'go' ? (p.launch ? p.launch.toUpperCase() : 'GO!') : '');
+      if (tree === 'yellow' || tree === 'red') AU.sfx('light');
+    }
+    if (!p.done && p.status === 'staged' && S.player) setTxtC('h-hint', p.light === 'green' ? 'HIT THE THROTTLE!' : ((IN.usingTouch || (W.matchMedia && W.matchMedia('(pointer: coarse)').matches)) ? 'Hold THROTTLE on GREEN' : 'Press W / ↑ on GREEN'));
+    else setTxtC('h-hint', '');
+    if (S.player) { var pf = Math.round(IN.pedal * 100); if (c.pf !== pf) { c.pf = pf; $('pfill').style.height = pf + '%'; } }
+    HUD.drawTach(p);
+  },
+  drawTach: function (p) {
+    var g = HUD._tachCtx; if (!g) return;
+    var st = p.stats, w = g.canvas.width, h = g.canvas.height, cx = w / 2, cy = h / 2, R = w * 0.44;
+    var maxR = st.redline * 1.1, a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
+    g.clearRect(0, 0, w, h);
+    g.lineCap = 'butt';
+    g.lineWidth = w * 0.07; g.strokeStyle = 'rgba(255,244,220,0.18)'; g.beginPath(); g.arc(cx, cy, R, a0, a1); g.stroke();
+    var ar = a0 + (a1 - a0) * (st.redline / maxR);
+    g.strokeStyle = '#d23a2a'; g.beginPath(); g.arc(cx, cy, R, ar, a1); g.stroke();
+    var as = a0 + (a1 - a0) * (st.shiftRpm / maxR);
+    g.strokeStyle = '#3fbf5a'; g.beginPath(); g.arc(cx, cy, R, as - 0.08, as + 0.08); g.stroke();
+    var rn = clamp(p.rpm / maxR, 0, 1), an = a0 + (a1 - a0) * rn;
+    g.strokeStyle = p.limiter ? '#ff3b1a' : '#ffd23f'; g.lineWidth = w * 0.07; g.beginPath(); g.arc(cx, cy, R, a0, an); g.stroke();
+    g.strokeStyle = '#fff4dc'; g.lineWidth = w * 0.025; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(an) * R * 0.92, cy + Math.sin(an) * R * 0.92); g.stroke();
+    g.fillStyle = '#fff4dc'; g.font = '700 ' + Math.round(w * 0.085) + 'px "Saira Condensed", sans-serif'; g.textAlign = 'center';
+    g.fillText(Math.round(p.rpm / 10) * 10 + ' RPM', cx, cy + R * 0.78);
+  }
+};
+function setTxt(id, t) { var e = $(id); if (e && e.textContent !== t) e.textContent = t; }
+function setTxtC(id, t) { var c = HUD._c; if (c['t' + id] === t) return; c['t' + id] = t; var e = $(id); if (e) e.textContent = t; }
+function toggleC(id, cls, on) { var c = HUD._c, k = 'c' + id + cls; if (c[k] === on) return; c[k] = on; var e = $(id); if (e) e.classList.toggle(cls, on); }
+UI.$el = function (tag, cls, html) { var e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+/** A named HUD slot element (existing [data-slot=name] in #hud, or a new div in #hud-extra). */
+UI.hudSlot = function (name) {
+  var e = document.querySelector('#hud [data-slot="' + name + '"]');
+  if (e) return e;
+  e = document.createElement('div'); e.className = 'hud-slot slot-' + name; e.setAttribute('data-slot', name);
+  $('hud-extra').appendChild(e); return e;
+};
+
+/* ---- Pause ---- */
+TP.pause = function () {
+  if (!R3.pullUpdate || TP.paused) return;
+  TP.paused = true; if (AU.ctx && AU.ready) { try { AU.ctx.suspend(); } catch (e) {} }
+  UI.show('pause'); TP.emit('pause');
+};
+TP.resume = function () {
+  if (!TP.paused) return;
+  TP.paused = false; if (AU.ctx && AU.ready) { try { AU.ctx.resume(); } catch (e) {} }
+  UI.hide('pause'); IN.reset(); TP.emit('resume');
+};
+TP.on('pauseKey', function () { if (TP.paused) TP.resume(); else if (R3.pullUpdate) TP.pause(); else if (UI.current && UI.current !== 'menu') UI.back(); });
+TP.on('hidden', function () { if (R3.pullUpdate && PR && PR.player && !PR.p.done) TP.pause(); });
+TP.on('cameraKey', function () { if (R3.pullUpdate) { CAM.director = false; var m = CAM.cycle(); UI.toast('Camera: ' + CAM.names[m]); } });
+UI.register('pause', {
+  render: function (el) {
+    el.innerHTML = '<div class="panel narrow center"><h2 class="big">PAUSED</h2><div class="stackb"></div></div>';
+    var s = el.querySelector('.stackb');
+    s.appendChild(UI.menuButton('Resume', TP.resume, { primary: true, icon: 'play' }));
+    s.appendChild(UI.menuButton('Camera: ' + CAM.names[CAM.mode], function (e) { CAM.director = false; var m = CAM.cycle(); e.currentTarget.querySelector('.bl').textContent = 'Camera: ' + CAM.names[m]; if (PR && PR.player) { TP.save.settings.camera = m; TP.store(); } }, { icon: 'cam' }));
+    s.appendChild(UI.menuButton('Sound: ' + (TP.save.settings.sound ? 'ON' : 'OFF'), function (e) { TP.save.settings.sound = !TP.save.settings.sound; TP.store(); AU.setMuted(!TP.save.settings.sound); e.currentTarget.querySelector('.bl').textContent = 'Sound: ' + (TP.save.settings.sound ? 'ON' : 'OFF'); }, { icon: 'sound' }));
+    s.appendChild(UI.menuButton('Quit to menu', function () { TP.paused = false; if (AU.ctx) try { AU.ctx.resume(); } catch (e) {} UI.hide('pause'); TP.abortPull(); setTimeout(function () { if (!UI.current && !R3.pullUpdate) TP.toMenu(); }, 0); }, { icon: 'back' }));
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * 20. SCREENS: menu, quick pull, results, watch, garage, shop, settings, career
+ *   (features replace/extend these via TP.ui.register(id, def) and TP.ui.addMenuItem)
+ * ------------------------------------------------------------------------- */
+TP.toMenu = function () {
+  if (R3.pullUpdate) TP.abortPull();
+  TP.paused = false; TP.timeScale = 1;
+  UI.stack.length = 0; UI.current = null;
+  TP.loadVenue((TP.venueState && TP.venueState.id) || 'county_fair');
+  var g = TP.garage.selected();
+  TP.menuShowcase(g ? g.vehicleId : null, g ? g.livery : null);
+  UI.show('menu');
+};
+UI.register('menu', {
+  render: function (el) {
+    var cls = TP.classList().length, veh = Object.keys(TP.vehicles).length;
+    el.innerHTML = '<div class="menu-wrap"><div class="menu-col">' +
+      '<div class="logo"><div class="logo-top">COUNTY FAIR</div><div class="logo-main">FULL<span>PULL</span></div><div class="logo-sub">Truck &amp; Tractor Pulling</div></div>' +
+      '<div class="menu-btns"></div>' +
+      '<div class="menu-foot"><span class="chip cash">' + fmtCash(TP.save.cash) + '</span><span class="chip lvl">LVL ' + TP.save.level + '</span><span class="chip">' + cls + ' classes · ' + veh + ' rigs</span></div>' +
+      '</div><div class="menu-right"><div class="rotate-tip">' + UI.icon('play') + ' Best played in landscape</div></div></div>';
+    var host = el.querySelector('.menu-btns');
+    UI.menuItems.forEach(function (m) { if (m.hidden) return; host.appendChild(UI.menuButton(m.label, m.action, { primary: m.primary, icon: m.icon, sub: m.sub })); });
+  },
+  onShow: function () { if (!SHOW && !R3.pullUpdate) { var g = TP.garage.selected(); TP.menuShowcase(g ? g.vehicleId : null, g ? g.livery : null); } }
+});
+
+/** Vehicle card html. */
+UI.vehicleCard = function (v, o) {
+  o = o || {};
+  var s = v.specs || {}, locked = TP.save.level < v.levelReq;
+  return '<button class="card veh' + (o.sel ? ' sel' : '') + (locked && !o.allowLocked ? ' locked' : '') + '" data-act="' + (o.act || 'veh') + '" data-id="' + esc(o.id || v.id) + '">' +
+    '<div class="swatch" style="background:' + esc((v.liveries[0] && v.liveries[0].base) || '#888') + '"><span>' + esc((v.liveries[0] && v.liveries[0].number) || '') + '</span></div>' +
+    '<div class="ct"><b>' + esc(v.name) + '</b><small>' + esc(v.brand || '') + '</small>' +
+    '<div class="specs"><span>' + fmtNum(s.hp || 0) + ' hp</span><span>' + fmtNum(s.weight || 0) + ' lb</span><span>' + (s.gears ? s.gears.length : 0) + ' gears</span></div>' +
+    (o.tag ? '<em class="tag">' + esc(o.tag) + '</em>' : '') + (locked && !o.allowLocked ? '<em class="tag lock">' + UI.icon('lock') + ' LVL ' + v.levelReq + '</em>' : '') + '</div></button>';
+};
+/** Class card html. */
+UI.classCard = function (c, o) {
+  o = o || {};
+  var n = TP.vehiclesInClass(c.id).length, best = TP.save.stats.bestByClass[c.id];
+  return '<button class="card cls' + (o.sel ? ' sel' : '') + (n ? '' : ' empty') + '" data-act="' + (o.act || 'cls') + '" data-id="' + c.id + '">' +
+    UI.icon(c.group === 'tractor' ? 'tractor' : 'truck', 'cico') + '<div class="ct"><b>' + esc(c.name) + '</b>' +
+    '<small>' + fmtNum(c.weightLimit) + ' lb · ' + fmtNum(c.hpRange[0]) + '–' + fmtNum(c.hpRange[1]) + ' hp</small>' +
+    '<div class="diff">' + '<i class="on"></i>'.repeat(c.difficulty) + '<i></i>'.repeat(Math.max(0, 5 - c.difficulty)) + '</div>' +
+    (n ? (best ? '<em class="tag">BEST ' + best.toFixed(2) + ' ft</em>' : '') : '<em class="tag">NO RIGS YET</em>') + '</div></button>';
+};
+
+/* Quick Pull: class -> vehicle -> venue -> go */
+var QP = { group: 'truck', cls: 'street_diesel', veh: null, venue: 'county_fair' };
+TP.quick = QP;
+/** Player garage entry for a vehicle (or a loaner {uid:null, vehicleId, upgrades:{}, livery:{}}). */
+TP.playerEntry = function (vehicleId) { return TP.garage.findByVehicle(vehicleId) || { uid: null, vehicleId: vehicleId, upgrades: {}, livery: {}, loaner: true }; };
+UI.register('quick', {
+  render: function (el) {
+    if (!TP.classes[QP.cls]) QP.cls = 'street_diesel';
+    QP.group = TP.classes[QP.cls].group;
+    var vehs = TP.vehiclesInClass(QP.cls);
+    if (!QP.veh || !TP.vehicles[QP.veh] || TP.vehicles[QP.veh].class !== QP.cls) {
+      var own = vehs.filter(function (v) { return TP.garage.owns(v.id); })[0];
+      QP.veh = own ? own.id : (vehs[0] ? vehs[0].id : null);
+    }
+    var venues = Object.keys(TP.venues).map(function (k) { return TP.venues[k]; });
+    var h = UI.header('Quick Pull') + '<div class="scr-body">' +
+      '<div class="tabs"><button class="tab' + (QP.group === 'truck' ? ' on' : '') + '" data-act="grp" data-id="truck">' + UI.icon('truck') + ' Trucks</button><button class="tab' + (QP.group === 'tractor' ? ' on' : '') + '" data-act="grp" data-id="tractor">' + UI.icon('tractor') + ' Tractors</button></div>' +
+      '<h3>Class</h3><div class="grid cls-grid">' + TP.classList(QP.group).map(function (c) { return UI.classCard(c, { sel: c.id === QP.cls }); }).join('') + '</div>' +
+      '<p class="desc">' + esc(TP.classes[QP.cls].desc) + '</p>' +
+      '<h3>Vehicle</h3><div class="grid veh-grid">' + (vehs.length ? vehs.map(function (v) { return UI.vehicleCard(v, { sel: v.id === QP.veh, tag: TP.garage.owns(v.id) ? 'OWNED' : 'TEST RIDE' }); }).join('') : '<p class="muted">No vehicles in this class yet.</p>') + '</div>' +
+      '<h3>Venue</h3><div class="row wrap">' + venues.map(function (v) { var lk = TP.save.level < (v.levelReq || 1); return '<button class="chipbtn' + (v.id === QP.venue ? ' on' : '') + (lk ? ' locked' : '') + '" data-act="ven" data-id="' + v.id + '">' + esc(v.name) + (lk ? ' · LVL ' + v.levelReq : '') + '</button>'; }).join('') + '</div>' +
+      '<div class="sticky-go"><button class="btn primary go" data-act="go"' + (QP.veh ? '' : ' disabled') + '>' + UI.icon('flag') + '<span class="bl">HOOK UP &amp; PULL</span></button></div></div>';
+    el.innerHTML = h;
+    UI.wire(el, {
+      grp: function (id) { QP.group = id; var first = TP.classList(id).filter(function (c) { return TP.vehiclesInClass(c.id).length; })[0] || TP.classList(id)[0]; QP.cls = first.id; QP.veh = null; UI.screens_rerender('quick'); },
+      cls: function (id) { QP.cls = id; QP.veh = null; UI.screens_rerender('quick'); },
+      veh: function (id) { if (TP.save.level < TP.vehicles[id].levelReq) { UI.toast('Reach level ' + TP.vehicles[id].levelReq + ' to drive this one', 'bad'); return; } QP.veh = id; UI.screens_rerender('quick'); var e = TP.playerEntry(id); TP.menuShowcase(id, e.livery); },
+      ven: function (id) { if (TP.save.level < (TP.venues[id].levelReq || 1)) { UI.toast('Venue unlocks at level ' + TP.venues[id].levelReq, 'bad'); return; } QP.venue = id; TP.loadVenue(id); var e = TP.playerEntry(QP.veh); TP.menuShowcase(QP.veh, e.livery); UI.screens_rerender('quick'); },
+      go: function () { if (QP.veh) TP.startQuickPull(QP.veh, QP.venue); }
+    });
+  }
+});
+/** Re-render a screen in place (keeps scroll). */
+UI.screens_rerender = function (id) { var el = UI.screen(id), sc = el.scrollTop; var b = el.querySelector('.scr-body'), bs = b ? b.scrollTop : 0; TP.screens[id].render(el, {}); el.scrollTop = sc; b = el.querySelector('.scr-body'); if (b) b.scrollTop = bs; };
+UI.rerender = UI.screens_rerender;
+
+/** Start a player quick pull. Resolves with the result after the results screen is shown. */
+TP.startQuickPull = function (vehicleId, venueId, o) {
+  o = o || {};
+  vehicleId = vehicleId || QP.veh || 'sd_thunderbolt';
+  var e = TP.playerEntry(vehicleId);
+  UI.hide();
+  return TP.runPull({ vehicleId: vehicleId, upgrades: e.upgrades, livery: e.livery, controller: o.controller || 'player', venue: venueId || QP.venue, name: o.name || 'You', trackCondition: o.trackCondition, seed: o.seed, label: 'quick' })
+    .then(function (res) {
+      if (!res || res.aborted) { if (!UI.current) TP.toMenu(); return res; }
+      var rew = TP.rewardFor(res, { mult: 0.35 });
+      TP.addCash(rew.cash, 'quickPull'); TP.addXP(rew.xp);
+      UI.show('results', { result: res, reward: rew, again: function () { TP.startQuickPull(vehicleId, venueId, o); } });
+      return res;
+    });
+};
+/** Cash/XP for a result. o.mult scales cash (quick pull 0.35, events use purse instead). */
+TP.rewardFor = function (res, o) {
+  o = o || {};
+  var cls = TP.classes[res.classId] || {};
+  if (res.dq) return { cash: 0, xp: 10 };
+  var cash = Math.round(res.distanceFt * (cls.payPerFt || 7) * (o.mult != null ? o.mult : 0.35) + (res.fullPull ? 400 * (cls.difficulty || 1) : 0));
+  var xp = Math.round(res.distanceFt / 3 + (res.fullPull ? 60 : 0) + (res.launch === 'perfect' ? 15 : 0));
+  return { cash: cash, xp: xp };
+};
+/* Record player stats on every pull end */
+TP.on('pullEnd', function (r) {
+  if (!r || !r.player || r.aborted) return;
+  var s = TP.save.stats;
+  s.pulls++; s.totalFt += r.distanceFt;
+  if (r.fullPull) s.fullPulls++;
+  if (r.broken) s.breakdowns++;
+  if (r.dq) s.outs++;
+  if (r.launch === 'perfect') s.perfectLaunches++;
+  if (!r.dq) {
+    r.newBest = r.distanceFt > (s.bestByClass[r.classId] || 0);
+    if (r.newBest) s.bestByClass[r.classId] = r.distanceFt;
+    if (r.distanceFt > (s.bestByVehicle[r.vehicleId] || 0)) s.bestByVehicle[r.vehicleId] = r.distanceFt;
+  }
+  TP.store();
+});
+TP.on('pullEnd', function (r) { if (r && !r.player && !r.aborted) { TP.save.stats.watched++; } });
+
+UI.register('results', {
+  render: function (el, a) {
+    var r = a.result || {}, rew = a.reward || { cash: 0, xp: 0 }, cls = TP.classes[r.classId] || {}, veh = TP.vehicles[r.vehicleId] || {};
+    el.innerHTML = '<div class="panel results ' + (r.fullPull ? 'full' : '') + '"><div class="res-top"><small>' + esc(cls.name || '') + ' · ' + esc(veh.name || '') + '</small>' +
+      '<div class="res-dist">' + (r.dq ? 'DQ' : r.distanceText) + (r.dq ? '' : '<span> ft</span>') + '</div>' +
+      '<div class="res-reason">' + (r.fullPull ? 'FULL PULL!' : esc(r.reason || '')) + (r.newBest ? ' · <b>NEW BEST</b>' : '') + '</div></div>' +
+      '<div class="statgrid"><div><small>Launch</small><b>' + esc((r.launch || '-').toUpperCase()) + '</b></div><div><small>Top speed</small><b>' + (r.topSpeed || 0).toFixed(1) + ' mph</b></div>' +
+      '<div><small>Max hop</small><b>' + Math.round((r.maxHop || 0) * 100) + '%</b></div><div><small>Pull time</small><b>' + (r.time || 0).toFixed(2) + ' s</b></div></div>' +
+      '<div class="rewards"><span class="chip cash">+' + fmtCash(rew.cash) + '</span><span class="chip lvl">+' + rew.xp + ' XP</span></div>' +
+      '<div class="row center btnrow"></div></div>';
+    var row = el.querySelector('.btnrow');
+    if (a.again) row.appendChild(UI.menuButton('Pull again', a.again, { primary: true, icon: 'flag' }));
+    if (a.next) row.appendChild(UI.menuButton(a.nextLabel || 'Continue', a.next, { primary: !a.again, icon: 'play' }));
+    if (!a.next) row.appendChild(UI.menuButton('Change rig', function () { TP.toMenu(); UI.show('quick'); }, { icon: 'wrench' }));
+    if (!a.next) row.appendChild(UI.menuButton('Menu', TP.toMenu, { icon: 'back' }));
+    if (r.fullPull) AU.sfx('coin');
+  }
+});
+
+/* Watch: spectate AI pulls of any class */
+var WT = { group: 'truck', cls: 'street_diesel', last: null };
+UI.register('watch', {
+  render: function (el) {
+    if (!TP.classes[WT.cls]) WT.cls = 'street_diesel';
+    var field = TP.event.fieldFor(WT.cls, 5);
+    var h = UI.header('Watch') + '<div class="scr-body">' +
+      '<div class="tabs"><button class="tab' + (WT.group === 'truck' ? ' on' : '') + '" data-act="grp" data-id="truck">' + UI.icon('truck') + ' Trucks</button><button class="tab' + (WT.group === 'tractor' ? ' on' : '') + '" data-act="grp" data-id="tractor">' + UI.icon('tractor') + ' Tractors</button></div>' +
+      '<div class="grid cls-grid">' + TP.classList(WT.group).map(function (c) { return UI.classCard(c, { sel: c.id === WT.cls }); }).join('') + '</div>' +
+      (WT.last ? '<p class="lastres">Last pull: <b>' + esc(WT.last.name) + '</b> — ' + (WT.last.dq ? 'DQ' : WT.last.distanceText + ' ft') + (WT.last.fullPull ? ' · FULL PULL' : '') + '</p>' : '') +
+      '<h3>Drivers in ' + esc(TP.classes[WT.cls].name) + '</h3>' +
+      (field.length ? '<div class="list">' + field.map(function (d) {
+        var v = TP.vehicles[d.vehicleId] || {};
+        return '<div class="lrow"><span class="dot" style="background:' + esc(d.color || (d.livery && d.livery.base) || '#ffd23f') + '"></span><div class="lt"><b>' + esc(d.name) + (d.nickname ? ' “' + esc(d.nickname) + '”' : '') + '</b><small>' + esc(d.hometown || '') + ' · ' + esc(v.name || '') + ' · ' + esc(skillName(d.skill)) + '</small></div>' +
+          '<button class="btn small" data-act="one" data-id="' + esc(d.id) + '">' + UI.icon('eye') + '<span class="bl">Watch</span></button></div>';
+      }).join('') + '</div><div class="sticky-go"><button class="btn primary go" data-act="heat">' + UI.icon('play') + '<span class="bl">WATCH A FULL HEAT</span></button></div>' : '<p class="muted">No rigs in this class yet.</p>') + '</div>';
+    el.innerHTML = h;
+    UI.wire(el, {
+      grp: function (id) { WT.group = id; WT.cls = (TP.classList(id).filter(function (c) { return TP.vehiclesInClass(c.id).length; })[0] || TP.classList(id)[0]).id; UI.rerender('watch'); },
+      cls: function (id) { WT.cls = id; UI.rerender('watch'); },
+      one: function (id) { TP.watchPulls([id]); },
+      heat: function () { TP.watchPulls(field.map(function (d) { return d.id; }), { heat: true }); }
+    });
+  }
+});
+function skillName(s) {
+  if (!s) return 'Good';
+  var v = (s.reaction + s.throttleFeel + s.shiftTiming + s.steering + s.consistency) / 5;
+  return v > 0.9 ? 'Legend' : v > 0.75 ? 'Pro' : v > 0.5 ? 'Veteran' : v > 0.3 ? 'Novice' : 'Rookie';
+}
+TP.skillName = skillName;
+/** Spectate a list of driver ids in sequence (fast-forward/skip available). Resolves with results[]. */
+TP.watchPulls = function (driverIds, o) {
+  o = o || {};
+  var results = [], i = 0, venue = o.venue || (TP.venueState && TP.venueState.id) || 'county_fair';
+  UI.hide();
+  var tc0 = TP.venues[venue] && TP.venues[venue].trackCondition != null ? TP.venues[venue].trackCondition : 0.2;
+  function next() {
+    if (i >= driverIds.length) {
+      if (o.heat && results.length > 1) { UI.show('standings', { title: 'Heat results', rows: TP.event.rank(results), done: function () { TP.toMenu(); UI.show('watch'); } }); }
+      else { TP.toMenu(); UI.show('watch'); }
+      return Promise.resolve(results);
+    }
+    var d = TP.drivers[driverIds[i]];
+    var tc = clamp(tc0 + i * 0.04, 0, 1); i++;
+    return TP.runPull({ vehicleId: d.vehicleId, livery: d.livery, upgrades: d.upgrades, driverId: d.id, controller: 'ai', skill: d.skill, spectate: true, venue: venue, trackCondition: tc, label: 'watch' })
+      .then(function (r) { if (!r || r.aborted) { results.aborted = true; return results; } r.entrant = d; results.push(r); WT.last = r; return next(); });
+  }
+  return next();
+};
+
+/* Garage */
+var GA = { uid: null };
+UI.register('garage', {
+  render: function (el) {
+    var list = TP.garage.list();
+    if (!GA.uid || !TP.garage.get(GA.uid)) GA.uid = TP.save.selected;
+    var g = TP.garage.get(GA.uid) || list[0];
+    var h = UI.header('Garage') + '<div class="scr-body">';
+    h += '<div class="grid veh-grid">' + list.map(function (e) { var v = TP.vehicles[e.vehicleId]; if (!v) return ''; return UI.vehicleCard(v, { id: e.uid, sel: g && e.uid === g.uid, tag: e.uid === TP.save.selected ? 'ACTIVE' : (TP.classes[v.class] || {}).name, allowLocked: true }); }).join('') + '</div>';
+    if (g && TP.vehicles[g.vehicleId]) {
+      var v = TP.vehicles[g.vehicleId], st = TP.sim.vehicleStats(g.vehicleId, g.upgrades);
+      h += '<div class="garage-detail"><div class="gd-head"><h3>' + esc(v.brand || '') + ' ' + esc(v.name) + '</h3>' +
+        (g.uid === TP.save.selected ? '<span class="chip">ACTIVE</span>' : '<button class="btn small" data-act="sel">Make active</button>') +
+        '<button class="btn small primary" data-act="pull">' + UI.icon('flag') + '<span class="bl">Pull</span></button></div>' +
+        '<div class="statgrid"><div><small>Power</small><b>' + fmtNum(st.hp) + ' hp</b></div><div><small>Torque</small><b>' + fmtNum(st.torqueLbft) + ' lb-ft</b></div><div><small>Weight</small><b>' + fmtNum(st.weightLb) + ' lb</b></div><div><small>Grip</small><b>' + st.mu.toFixed(3) + '</b></div></div>' +
+        '<h3>Paint</h3><div class="row wrap">' + v.liveries.map(function (lv, i) { var on = (g.livery && g.livery.name === lv.name) || (!g.livery.name && i === 0); return '<button class="chipbtn livery' + (on ? ' on' : '') + '" data-act="liv" data-id="' + i + '"><i style="background:' + esc(lv.base) + ';border-color:' + esc(lv.accent) + '"></i>' + esc(lv.name || ('Livery ' + (i + 1))) + '</button>'; }).join('') + '</div>' +
+        '<h3>Upgrades</h3><div class="list">' + Object.keys(TP.upgrades).map(function (uid) {
+          var u = TP.upgrades[uid]; if (!TP.upgradeApplies(u, g.vehicleId)) return '';
+          var lvl = g.upgrades[uid] | 0, next = u.levels[lvl];
+          return '<div class="lrow"><div class="lt"><b>' + esc(u.name) + '</b><small>' + esc(u.desc || u.slot) + '</small><div class="lvl">' + u.levels.map(function (x, k) { return '<i class="' + (k < lvl ? 'on' : '') + '"></i>'; }).join('') + '</div></div>' +
+            (next ? '<button class="btn small' + (TP.save.cash >= next.price ? ' primary' : '') + '" data-act="up" data-id="' + uid + '"' + (next.levelReq && TP.save.level < next.levelReq ? ' disabled' : '') + '><span class="bl">' + (next.levelReq && TP.save.level < next.levelReq ? 'LVL ' + next.levelReq : fmtCash(next.price)) + '</span></button>' : '<span class="chip">MAX</span>') + '</div>';
+        }).join('') + '</div></div>';
+    }
+    h += '</div>';
+    el.innerHTML = h;
+    UI.wire(el, {
+      veh: function (uid) { GA.uid = uid; var e = TP.garage.get(uid); TP.menuShowcase(e.vehicleId, e.livery); UI.rerender('garage'); },
+      sel: function () { TP.garage.select(g.uid); UI.rerender('garage'); },
+      liv: function (i) { var lv = v.liveries[+i]; g.livery = shallow(lv); TP.store(); TP.menuShowcase(g.vehicleId, g.livery); UI.rerender('garage'); },
+      up: function (uid) { if (TP.garage.buyUpgrade(g.uid, uid)) { AU.sfx('coin'); UI.toast(TP.upgrades[uid].name + ' installed!', 'good'); } else UI.toast('Not enough cash', 'bad'); UI.rerender('garage'); },
+      pull: function () { TP.garage.select(g.uid); QP.cls = v.class; QP.veh = v.id; TP.startQuickPull(v.id, QP.venue); }
+    });
+  }
+});
+
+/* Shop */
+var SH = { cat: 'vehicles' };
+UI.register('shop', {
+  render: function (el) {
+    var cats = TP.shop.categories.filter(function (c) { return TP.shop.items.some(function (i) { return i.category === c; }); });
+    if (cats.indexOf(SH.cat) < 0) SH.cat = cats[0] || 'vehicles';
+    var items = TP.shop.items.filter(function (i) { return i.category === SH.cat && !i.hidden; }).sort(function (a, b) { return (a.levelReq - b.levelReq) || (a.price - b.price); });
+    el.innerHTML = UI.header('Shop') + '<div class="scr-body"><div class="tabs scroll">' + cats.map(function (c) { return '<button class="tab' + (c === SH.cat ? ' on' : '') + '" data-act="cat" data-id="' + c + '">' + esc(c.toUpperCase()) + '</button>'; }).join('') + '</div>' +
+      '<div class="grid shop-grid">' + items.map(function (it) {
+        var bl = TP.shop.blocker(it.id);
+        return '<div class="card shop"><canvas class="sicon" width="96" height="64" data-icon="' + esc(it.id) + '"></canvas><div class="ct"><b>' + esc(it.name) + '</b><small>' + esc(it.desc || '') + '</small></div>' +
+          '<button class="btn small' + (bl ? '' : ' primary') + '" data-act="buy" data-id="' + esc(it.id) + '"' + (bl ? ' disabled' : '') + '><span class="bl">' + (bl ? esc(bl) : fmtCash(it.price)) + '</span></button></div>';
+      }).join('') + (items.length ? '' : '<p class="muted">Nothing here yet.</p>') + '</div></div>';
+    var cvs = el.querySelectorAll('canvas[data-icon]');
+    for (var i = 0; i < cvs.length; i++) { var it = TP.shop.get(cvs[i].getAttribute('data-icon')); var c2 = cvs[i].getContext('2d'); try { (it.icon || UI.defaultShopIcon)(c2, 96, 64, it); } catch (e) { UI.defaultShopIcon(c2, 96, 64, it); } }
+    UI.wire(el, {
+      cat: function (c) { SH.cat = c; UI.rerender('shop'); },
+      buy: function (id) { if (TP.shop.buy(id)) { AU.sfx('coin'); UI.toast('Purchased: ' + TP.shop.get(id).name, 'good'); } UI.rerender('shop'); }
+    });
+  }
+});
+/** Default shop icon painter (ctx, w, h, item). */
+UI.defaultShopIcon = function (c, w, h, it) {
+  var g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, '#3b2414'); g.addColorStop(1, '#17140f'); c.fillStyle = g; c.fillRect(0, 0, w, h);
+  if (it && it.vehicleId && TP.vehicles[it.vehicleId]) {
+    var v = TP.vehicles[it.vehicleId], lv = v.liveries[0] || {}, tr = (TP.classes[v.class] || {}).group === 'tractor';
+    c.fillStyle = lv.base || '#c33'; c.fillRect(w * 0.18, h * (tr ? 0.3 : 0.38), w * 0.62, h * (tr ? 0.22 : 0.22));
+    c.fillRect(w * (tr ? 0.22 : 0.42), h * 0.18, w * 0.2, h * 0.22);
+    c.fillStyle = '#121212'; c.beginPath(); c.arc(w * 0.28, h * 0.68, h * (tr ? 0.22 : 0.15), 0, 7); c.arc(w * 0.74, h * 0.7, h * (tr ? 0.11 : 0.15), 0, 7); c.fill();
+    c.fillStyle = '#ccc'; c.fillRect(w * 0.38, h * 0.05, w * 0.04, h * 0.3);
+    return;
+  }
+  c.fillStyle = '#ffd23f'; c.font = '900 30px "Saira Condensed", sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(String((it && it.category) || '?').slice(0, 1).toUpperCase(), w / 2, h / 2 + 2);
+};
+
+/* Settings */
+UI.register('settings', {
+  render: function (el) {
+    var s = TP.save.settings;
+    function tog(k, label) { return '<div class="lrow"><div class="lt"><b>' + label + '</b></div><button class="toggle' + (s[k] ? ' on' : '') + '" data-act="tog" data-id="' + k + '" aria-pressed="' + !!s[k] + '"><i></i></button></div>'; }
+    el.innerHTML = UI.header('Settings') + '<div class="scr-body"><div class="list">' +
+      '<div class="lrow"><div class="lt"><b>Graphics</b><small>Auto picks Low on slower phones</small></div><div class="seg">' + ['auto', 'high', 'low'].map(function (q) { return '<button class="' + (s.quality === q ? 'on' : '') + '" data-act="q" data-id="' + q + '">' + q.toUpperCase() + '</button>'; }).join('') + '</div></div>' +
+      tog('sound', 'Sound') +
+      '<div class="lrow"><div class="lt"><b>Volume</b></div><input type="range" min="0" max="1" step="0.05" value="' + s.volume + '" id="set-vol"></div>' +
+      tog('shake', 'Camera shake') + tog('autoShift', 'Auto shift (easier, no perfect-shift bonus)') + tog('assistTraction', 'Traction assist (limits wheel spin)') + tog('showFps', 'Show FPS') +
+      '<div class="lrow"><div class="lt"><b>Reset progress</b><small>Erase cash, garage and career</small></div><button class="btn small danger" data-act="reset"><span class="bl">Reset</span></button></div>' +
+      '</div><p class="muted small">Desktop: W/↑ throttle · A/D steer · Space shift · Shift boost · C camera · Esc pause</p></div>';
+    UI.wire(el, {
+      tog: function (k) { s[k] = !s[k]; TP.store(); if (k === 'sound') AU.setMuted(!s.sound); TP.emit('settings', s); UI.rerender('settings'); },
+      q: function (q) { s.quality = q; TP.store(); TP.setQuality(q === 'auto' ? pickQuality() : q); TP.emit('settings', s); UI.rerender('settings'); },
+      reset: function (id, btn) { if (!btn.classList.contains('confirm')) { btn.classList.add('confirm'); btn.querySelector('.bl').textContent = 'Tap again'; return; } TP.resetSave(); UI.toast('Progress reset'); TP.toMenu(); }
+    });
+    var vol = el.querySelector('#set-vol');
+    vol.addEventListener('input', function () { s.volume = +vol.value; AU.setMuted(!s.sound); TP.store(); });
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * 21. EVENTS  TP.event — minimal pulling event (events.js expands)
+ * ------------------------------------------------------------------------- */
+var FIRST = ['Dale', 'Cody', 'Rusty', 'Jolene', 'Hank', 'Luann', 'Travis', 'Darla', 'Clint', 'Wyatt', 'Becky', 'Merle', 'Shane', 'Tess', 'Duke', 'Ruby', 'Colt', 'June'];
+var LAST = ['Hollister', 'Pruett', 'McCall', 'Sorensen', 'Vance', 'Brandt', 'Tillman', 'Oakes', 'Rasmussen', 'Kincaid', 'Dvorak', 'Lund', 'Garber', 'Whitfield'];
+var TOWNS = ['Elk Ridge, KS', 'Corn City, IA', 'Sweetwater, NE', 'Muddy Creek, IN', 'Harlan Flats, OH', 'Prairie Rose, SD', 'Bucksnort, TN', 'Two Forks, WI'];
+var NICK = ['Dirt Devil', 'Big Iron', 'Thunder', 'Smokey', 'Hammer', 'Gopher', 'Sparky', 'Torque', 'Mudcat', 'Diesel'];
+var SKILLS_POOL = ['novice', 'good', 'good', 'pro', 'good', 'pro', 'novice'];
+TP.event = {
+  /** Field of AI drivers for a class: registered drivers whose vehicle is in the class, then generated
+   *  (deterministic, registered with generated:true) up to n. Returns driver defs. */
+  fieldFor: function (classId, n) {
+    n = n || 4;
+    var out = Object.keys(TP.drivers).map(function (k) { return TP.drivers[k]; }).filter(function (d) { return !d.generated && TP.vehicles[d.vehicleId] && TP.vehicles[d.vehicleId].class === classId; });
+    var vehs = TP.vehiclesInClass(classId);
+    if (!vehs.length) return out;
+    var rng = makeRng(hashStr(classId));
+    for (var i = 0; out.length < n; i++) {
+      var id = 'gen_' + classId + '_' + i;
+      if (!TP.drivers[id]) {
+        var v = vehs[i % vehs.length], li = v.liveries[(i + 1) % v.liveries.length] || {};
+        var fn = FIRST[(rng() * FIRST.length) | 0], ln = LAST[(rng() * LAST.length) | 0];
+        TP.addDriver(id, { name: fn + ' ' + ln, nickname: NICK[(rng() * NICK.length) | 0], hometown: TOWNS[(rng() * TOWNS.length) | 0], vehicleId: v.id,
+          livery: { base: li.base, accent: li.accent, trim: li.trim, pattern: li.pattern, number: String(10 + ((rng() * 89) | 0)) }, skill: SKILLS_POOL[i % SKILLS_POOL.length], generated: true, color: li.base,
+          lines: { intro: ['From ' + TOWNS[i % TOWNS.length].split(',')[0] + ', here is ' + fn + ' ' + ln + '!'], good: ['Nice hook from ' + fn + '!'], full: [fn + ' ' + ln + ' goes the distance!'], bad: ['Not ' + fn + '\'s night.'] } });
+      }
+      out.push(TP.drivers[id]);
+      if (i > 40) break;
+    }
+    return out.slice(0, Math.max(n, out.length));
+  },
+  /** Sort results: full pulls first (pull-off rank), then distance; DQ last. Returns new array. */
+  rank: function (results) {
+    return results.slice().sort(function (a, b) {
+      if (a.dq !== b.dq) return a.dq ? 1 : -1;
+      if ((b.pullOffRank != null || a.pullOffRank != null) && a.fullPull && b.fullPull) return (a.pullOffRank != null ? a.pullOffRank : 99) - (b.pullOffRank != null ? b.pullOffRank : 99);
+      return b.distanceFt - a.distanceFt;
+    });
+  },
+  /** The player's vehicle entry for a class (selected if it matches, owned, or a loaner). */
+  playerEntryFor: function (classId) {
+    var sel = TP.garage.selected();
+    if (sel && TP.vehicles[sel.vehicleId] && TP.vehicles[sel.vehicleId].class === classId) return sel;
+    var own = TP.save.garage.filter(function (g) { return TP.vehicles[g.vehicleId] && TP.vehicles[g.vehicleId].class === classId; })[0];
+    if (own) return own;
+    var v = TP.vehiclesInClass(classId)[0];
+    return v ? { uid: null, vehicleId: v.id, upgrades: {}, livery: {}, loaner: true } : null;
+  },
+  active: null,
+  /**
+   * Run an event: def = {id?, name, venue, classes:[classId], entrants?:[driverId|'player'], fieldSize?, purse (per class),
+   *   payout?:[0.5,0.3,0.2], pointsTable?:[...], trackCondition?, pullOffMult?:1.08, xp?}
+   * Returns Promise<results> where results = {event, classes:{classId:[ranked results]}, player:{place, cash, points, xp}}.
+   */
+  run: function (def) {
+    def = shallow(def || {});
+    def.classes = def.classes && def.classes.length ? def.classes : ['street_diesel'];
+    def.venue = def.venue || 'county_fair';
+    def.purse = def.purse != null ? def.purse : 3000;
+    def.payout = def.payout || [0.5, 0.3, 0.2];
+    def.pointsTable = def.pointsTable || [20, 17, 15, 13, 11, 10, 9, 8, 7, 6];
+    var out = { event: def, classes: {}, player: { place: 0, cash: 0, points: 0, xp: 0 } };
+    TP.event.active = { def: def, out: out };
+    TP.emit('eventStart', def);
+    TP.loadVenue(def.venue, { trackCondition: def.trackCondition });
+    var chain = Promise.resolve(), aborted = false;
+    def.classes.forEach(function (classId) {
+      chain = chain.then(function () { if (aborted) return; return runClass(def, classId, out).then(function (r) { if (r === 'abort') aborted = true; }); });
+    });
+    return chain.then(function () {
+      TP.event.active = null;
+      if (aborted) { TP.toMenu(); out.aborted = true; return out; }
+      if (out.player.cash) TP.addCash(out.player.cash, 'event');
+      TP.addXP(out.player.xp);
+      TP.save.stats.events++; if (out.player.place === 1) TP.save.stats.wins++;
+      TP.store();
+      TP.emit('eventEnd', out);
+      return new Promise(function (res) { UI.show('podium', { out: out, done: function () { res(out); if (def.onDone) def.onDone(out); else TP.toMenu(); } }); });
+    });
+  }
+};
+function runClass(def, classId, out) {
+  var cls = TP.classes[classId];
+  var ents = def.entrants && def.entrants.length ? def.entrants.slice() : TP.event.fieldFor(classId, def.fieldSize || 3).map(function (d) { return d.id; }).concat(['player']);
+  ents = ents.filter(function (e) { return e === 'player' || TP.drivers[e]; });
+  // order: AI shuffled; player somewhere after the first AI
+  var ai = ents.filter(function (e) { return e !== 'player'; }), hasPlayer = ents.indexOf('player') >= 0;
+  var rng = makeRng((Date.now() ^ hashStr(classId)) >>> 0);
+  for (var i = ai.length - 1; i > 0; i--) { var j = (rng() * (i + 1)) | 0, t = ai[i]; ai[i] = ai[j]; ai[j] = t; }
+  var order = ai.slice();
+  if (hasPlayer) order.splice(Math.min(order.length, 1 + ((rng() * order.length) | 0)), 0, 'player');
+  var pe = hasPlayer ? TP.event.playerEntryFor(classId) : null;
+  if (hasPlayer && !pe) order = order.filter(function (e) { return e !== 'player'; });
+  var results = [], idx = 0, skipAll = false;
+  var tc0 = def.trackCondition != null ? def.trackCondition : (TP.venues[def.venue] && TP.venues[def.venue].trackCondition != null ? TP.venues[def.venue].trackCondition : 0.2);
+  function pullOne(entrant, opts) {
+    opts = opts || {};
+    var tc = clamp(tc0 + results.length * 0.035, 0, 1);  // ruts build up
+    if (entrant === 'player') {
+      UI.hide();
+      return TP.runPull({ vehicleId: pe.vehicleId, upgrades: pe.upgrades, livery: pe.livery, controller: 'player', name: 'You', venue: def.venue, trackCondition: tc, sledMult: opts.sledMult, best: results.length ? TP.event.rank(results)[0].distanceFt : 0, label: 'event', classId: classId });
+    }
+    var d = TP.drivers[entrant];
+    var o = { vehicleId: d.vehicleId, livery: d.livery, upgrades: d.upgrades, driverId: d.id, controller: 'ai', skill: d.skill, spectate: true, venue: def.venue, trackCondition: tc, sledMult: opts.sledMult, label: 'event', classId: classId };
+    if (opts.skip) {
+      var r = TP.sim.simulate({ vehicleId: o.vehicleId, upgrades: o.upgrades, driver: d.id, venue: def.venue, trackCondition: tc, sledMult: o.sledMult, skill: d.skill, classId: classId });
+      r = shallow(r); r.name = d.name; r.driverId = d.id; r.player = false; TP.emit('pullEnd', r);
+      return Promise.resolve(r);
+    }
+    UI.hide();
+    return TP.runPull(o);
+  }
+  function step() {
+    if (idx >= order.length) return pullOffs();
+    var e = order[idx];
+    var isP = e === 'player';
+    if (!isP && skipAll) { return pullOne(e, { skip: true }).then(function (r) { record(e, r); idx++; return step(); }); }
+    return new Promise(function (res) {
+      UI.show('eventNext', { def: def, cls: cls, entrant: e, pe: pe, idx: idx, total: order.length, standings: TP.event.rank(results),
+        go: function (mode) { if (mode === 'skipAll') { skipAll = true; mode = 'skip'; } pullOne(e, { skip: mode === 'skip' }).then(function (r) {
+          if (!r || r.aborted) { res('abort'); return; }
+          record(e, r); idx++; res(step());
+        }); },
+        quit: function () { res('abort'); } });
+    });
+  }
+  function record(e, r) { r.entrant = e; r.name = e === 'player' ? 'You' : TP.drivers[e].name; r.player = e === 'player'; results.push(r); }
+  function pullOffs(round) {
+    round = round || 1;
+    var ranked = TP.event.rank(results);
+    var tied = ranked.filter(function (r) { return r.fullPull && r.pullOffRank == null; });
+    if (tied.length < 2 || round > 3) { tied.forEach(function (r, i) { r.pullOffRank = i; }); return finishClass(); }
+    var mult = Math.pow(def.pullOffMult || 1.08, round);
+    UI.banner('PULL-OFF!', tied.length + ' full pulls — adding weight', { kind: 'full', ms: 2600 });
+    TP.ui.announcer('We have a PULL-OFF, folks! They are adding weight to the box!', { priority: 3 });
+    var po = [], k = 0;
+    function nextPO() {
+      if (k >= tied.length) {
+        var pr = TP.event.rank(po), stillFull = pr.filter(function (r) { return r.fullPull; }).length;
+        pr.forEach(function (r, i) {
+          var orig = tied.filter(function (t) { return t.entrant === r.entrant; })[0];
+          orig.pullOff = r.distanceFt;
+          orig.pullOffRank = (stillFull > 1 && r.fullPull && round < 3) ? null : i;
+        });
+        if (tied.some(function (t) { return t.pullOffRank == null; })) return pullOffs(round + 1);
+        return finishClass();
+      }
+      var t = tied[k++];
+      return new Promise(function (res) {
+        UI.show('eventNext', { def: def, cls: cls, entrant: t.entrant, pe: pe, pullOff: round, idx: k - 1, total: tied.length, standings: TP.event.rank(results),
+          go: function (mode) { pullOne(t.entrant, { sledMult: mult, skip: mode === 'skip' || mode === 'skipAll' }).then(function (r) { if (!r || r.aborted) { res('abort'); return; } r.entrant = t.entrant; po.push(r); res(nextPO()); }); },
+          quit: function () { res('abort'); } });
+      });
+    }
+    return nextPO();
+  }
+  function finishClass() {
+    var ranked = TP.event.rank(results);
+    ranked.forEach(function (r, i) {
+      r.place = i + 1;
+      r.points = r.dq ? 0 : (def.pointsTable[i] || 0);
+      r.cash = Math.round(def.purse * (def.payout[i] || 0));
+      if (r.player) { out.player.place = r.place; out.player.cash += r.cash; out.player.points += r.points; out.player.xp += Math.round(r.distanceFt / 2 + (r.place === 1 ? 150 : 40)); }
+    });
+    out.classes[classId] = ranked;
+    return new Promise(function (res) { UI.show('standings', { title: cls.name + ' — Final', rows: ranked, final: true, done: function () { res(); } }); });
+  }
+  return step();
+}
+UI.register('eventNext', {
+  render: function (el, a) {
+    var isP = a.entrant === 'player', d = isP ? null : TP.drivers[a.entrant], v = TP.vehicles[isP ? a.pe.vehicleId : d.vehicleId];
+    el.innerHTML = '<div class="panel event-next"><div class="en-top"><small>' + esc(a.def.name || 'Pulling Event') + ' · ' + esc(a.cls.name) + (a.pullOff ? ' · PULL-OFF ' + a.pullOff : ' · Hook ' + (a.idx + 1) + ' of ' + a.total) + '</small>' +
+      '<h2 class="big">' + (isP ? 'YOUR PULL' : 'UP NEXT') + '</h2>' +
+      '<div class="en-who"><span class="dot" style="background:' + esc(isP ? '#ffd23f' : (d.color || '#ff7a1a')) + '"></span><div><b>' + esc(isP ? 'You' : d.name + (d.nickname ? ' “' + d.nickname + '”' : '')) + '</b><small>' + esc(v ? (v.brand + ' ' + v.name) : '') + (d && d.hometown ? ' · ' + esc(d.hometown) : '') + '</small></div></div></div>' +
+      '<div class="mini-stand">' + standingsHtml(a.standings.slice(0, 5)) + '</div><div class="row center btnrow"></div></div>';
+    var row = el.querySelector('.btnrow');
+    if (isP) row.appendChild(UI.menuButton('HOOK UP & PULL', function () { a.go('pull'); }, { primary: true, icon: 'flag' }));
+    else {
+      row.appendChild(UI.menuButton('Watch', function () { a.go('watch'); }, { primary: true, icon: 'eye' }));
+      row.appendChild(UI.menuButton('Skip', function () { a.go('skip'); }, { icon: 'skip' }));
+      row.appendChild(UI.menuButton('Skip all AI', function () { a.go('skipAll'); }, { icon: 'ff', small: true }));
+    }
+    row.appendChild(UI.menuButton('Quit', a.quit, { small: true, icon: 'back' }));
+  }
+});
+function standingsHtml(rows) {
+  if (!rows.length) return '<p class="muted">No pulls yet — the track is fresh.</p>';
+  return '<ol class="stand">' + rows.map(function (r, i) {
+    return '<li class="' + (r.player ? 'me' : '') + '"><span class="pos">' + (i + 1) + '</span><span class="nm">' + esc(r.name) + '</span><span class="ds">' + (r.dq ? 'DQ' : r.distanceText + ' ft') + (r.fullPull ? ' <em>FULL</em>' : '') + (r.pullOff != null ? ' <em>PO ' + r.pullOff.toFixed(2) + '</em>' : '') + '</span>' + (r.cash ? '<span class="pay">' + fmtCash(r.cash) + '</span>' : '') + '</li>';
+  }).join('') + '</ol>';
+}
+UI.standingsHtml = standingsHtml;
+UI.register('standings', {
+  render: function (el, a) {
+    el.innerHTML = '<div class="panel"><h2 class="big">' + esc(a.title || 'Standings') + '</h2>' + standingsHtml(a.rows || []) + '<div class="row center btnrow"></div></div>';
+    el.querySelector('.btnrow').appendChild(UI.menuButton('Continue', a.done, { primary: true, icon: 'play' }));
+  }
+});
+UI.register('podium', {
+  render: function (el, a) {
+    var out = a.out, h = '<div class="panel podium"><h2 class="big">' + esc(out.event.name || 'Results') + '</h2>';
+    Object.keys(out.classes).forEach(function (cid) {
+      var r = out.classes[cid];
+      h += '<h3>' + esc(TP.classes[cid].name) + '</h3><div class="pod">' + [1, 0, 2].map(function (i) { var x = r[i]; if (!x) return '<div class="step s' + (i + 1) + ' empty"></div>'; return '<div class="step s' + (i + 1) + (x.player ? ' me' : '') + '"><b>' + esc(x.name) + '</b><small>' + (x.dq ? 'DQ' : x.distanceText + ' ft') + '</small><div class="blk">' + (i + 1) + '</div></div>'; }).join('') + '</div>';
+    });
+    h += '<div class="rewards">' + (out.player.place ? '<span class="chip">You placed #' + out.player.place + '</span>' : '') + '<span class="chip cash">+' + fmtCash(out.player.cash) + '</span><span class="chip lvl">+' + out.player.xp + ' XP</span>' + (out.player.points ? '<span class="chip">+' + out.player.points + ' pts</span>' : '') + '</div><div class="row center btnrow"></div></div>';
+    el.innerHTML = h;
+    el.querySelector('.btnrow').appendChild(UI.menuButton('Continue', a.done, { primary: true, icon: 'play' }));
+    if (out.player.place === 1) { TP.cheer(1); AU.sfx('horn'); }
+  }
+});
+
+/* Career (minimal core version — career.js replaces TP.screens.career) */
+TP.career = { events: [] };
+TP.career.events.push({ id: 'county_open', name: 'County Fair Open', venue: 'county_fair', classes: ['street_diesel'], purse: 4000, levelReq: 1, desc: 'Street Diesels on a Saturday afternoon. Three locals and you.' });
+TP.career.events.push({ id: 'farm_night', name: 'Farm Stock Showdown', venue: 'county_fair', classes: ['farm_stock'], purse: 3500, levelReq: 1, desc: 'Field tractors, suitcase weights and a lot of pride.' });
+TP.career.events.push({ id: 'mini_madness', name: 'Mini Rod Madness', venue: 'county_fair', classes: ['mini_rod'], purse: 6000, levelReq: 2, desc: 'Two thousand pounds, a thousand horsepower. Hold on.' });
+UI.register('career', {
+  render: function (el) {
+    el.innerHTML = UI.header('Career') + '<div class="scr-body"><div class="list">' + TP.career.events.map(function (ev) {
+      var lk = TP.save.level < (ev.levelReq || 1);
+      return '<div class="lrow"><div class="lt"><b>' + esc(ev.name) + '</b><small>' + esc(ev.desc || '') + ' · Purse ' + fmtCash(ev.purse) + '</small></div><button class="btn small' + (lk ? '' : ' primary') + '" data-act="ev" data-id="' + ev.id + '"' + (lk ? ' disabled' : '') + '><span class="bl">' + (lk ? 'LVL ' + ev.levelReq : 'Enter') + '</span></button></div>';
+    }).join('') + '</div></div>';
+    UI.wire(el, { ev: function (id) { var ev = TP.career.events.filter(function (e) { return e.id === id; })[0]; if (ev) TP.event.run(ev); } });
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * 22. DEBUG  TP.debug (also: URL hash #debug shows FPS + logs helpers)
+ * ------------------------------------------------------------------------- */
+TP.debug = {
+  /** Headless pull: TP.debug.simulate('sd_thunderbolt', 'pro', {seed, upgrades, trackCondition}) -> result */
+  simulate: function (vehicleId, skill, opts) {
+    var o = shallow(opts || {}); o.vehicleId = vehicleId || 'sd_thunderbolt'; o.skill = skill || 'pro';
+    return TP.sim.simulate(o);
+  },
+  /** Distribution helper: n runs -> {avgFt, avgPct, min, max, fullPulls, dq, broken, results} */
+  batch: function (vehicleId, skill, n, opts) {
+    n = n || 20; var res = [], sum = 0, mn = 1e9, mx = 0, full = 0, dq = 0, br = 0, L = 300;
+    for (var i = 0; i < n; i++) {
+      var o = shallow(opts || {}); o.seed = (o.seed || 1000) + i * 77;
+      var r = TP.debug.simulate(vehicleId, skill, o); res.push(r); L = r.trackLengthFt;
+      sum += r.distanceFt; mn = Math.min(mn, r.distanceFt); mx = Math.max(mx, r.distanceFt);
+      if (r.fullPull) full++; if (r.dq) dq++; if (r.broken) br++;
+    }
+    return { avgFt: +(sum / n).toFixed(2), avgPct: +(sum / n / L * 100).toFixed(1), min: mn, max: mx, fullPulls: full, dq: dq, broken: br, results: res };
+  },
+  giveCash: function (n) { return TP.addCash(n == null ? 100000 : n, 'debug'); },
+  setLevel: function (l) { TP.save.level = Math.max(1, l | 0); TP.save.xp = TP.xpForLevel(TP.save.level); TP.store(); TP.emit('levelUp', TP.save.level); return TP.save.level; },
+  unlockAll: function () {
+    TP.debug.setLevel(99); TP.save.cash = Math.max(TP.save.cash, 10000000);
+    Object.keys(TP.vehicles).forEach(function (id) { if (!TP.garage.owns(id) && !TP.vehicles[id].hidden) TP.garage.add(id); });
+    TP.store(); TP.emit('cash', 0, 'debug', TP.save.cash); return true;
+  },
+  startQuickPull: function (vehicleId, venueId) { return TP.startQuickPull(vehicleId || 'sd_thunderbolt', venueId || 'county_fair'); },
+  /** Player pull driven by the AI (exercise the player path hands-free). */
+  autoplay: function (vehicleId, skill, venueId) { return TP.startQuickPull(vehicleId || 'sd_thunderbolt', venueId || 'county_fair', { controller: TP.controllers.resolve('autoplay', skill || 'pro') }); },
+  fastForward: function (x) { return TP.setFastForward(x); },
+  listTypes: function () {
+    return { classes: Object.keys(TP.classes), vehicles: Object.keys(TP.vehicles), venues: Object.keys(TP.venues), drivers: Object.keys(TP.drivers).filter(function (k) { return !TP.drivers[k].generated; }),
+      upgrades: Object.keys(TP.upgrades), shop: TP.shop.items.map(function (i) { return i.id; }), screens: Object.keys(TP.screens), fx: Object.keys(TP.fx.types), cameras: Object.keys(CAM.presets), menu: UI.menuItems.map(function (m) { return m.id; }) };
+  },
+  fps: function () { return TP.fps(); },
+  info: function () { var i = TP.renderer ? TP.renderer.info : null; return i ? { calls: i.render.calls, triangles: i.render.triangles, geometries: i.memory.geometries, textures: i.memory.textures, particles: TP.fx.count(), fps: TP.fps(), quality: TP.quality } : null; }
+};
+
+/* ---------------------------------------------------------------------------
+ * 23. BOOT
+ * ------------------------------------------------------------------------- */
+function bindUiChrome() {
+  var bp = $('btnPause');
+  if (bp) bp.addEventListener('click', function () { AU.init(); if (TP.paused) TP.resume(); else TP.pause(); });
+  var spec = $('h-spec');
+  if (spec) spec.addEventListener('click', function (e) {
+    var t = e.target.closest('button'); if (!t) return;
+    AU.init();
+    if (t.hasAttribute('data-ff')) { var x = +t.getAttribute('data-ff'); TP.setFastForward(x); HUD.setFF(x); }
+    else if (t.hasAttribute('data-skip')) TP.skipPull();
+    else if (t.hasAttribute('data-cam')) { CAM.director = false; var m = CAM.cycle(); UI.toast('Camera: ' + CAM.names[m]); }
+    else if (t.hasAttribute('data-dir')) { CAM.director = true; UI.toast('Camera: Director'); }
+  });
+  var camb = $('btnCam');
+  if (camb) camb.addEventListener('click', function () { AU.init(); TP.emit('cameraKey'); });
+  // FPS meter
+  var fpsEl = $('fps'), fpsT = 0;
+  TP.onFrame(function (dt, realDt) {
+    fpsT -= realDt; if (fpsT > 0 || !fpsEl) return; fpsT = 0.5;
+    var on = TP.save.settings.showFps || TP.debugMode;
+    fpsEl.style.display = on ? '' : 'none';
+    if (on) { var i = TP.renderer.info.render; fpsEl.textContent = TP.fps() + ' fps · ' + i.calls + ' calls · ' + (i.triangles / 1000).toFixed(0) + 'k tris · ' + TP.quality; }
+  });
+  TP.on('cash', function () { var c = document.querySelectorAll('.chip.cash'); for (var i = 0; i < c.length; i++) if (!c[i].closest('.rewards')) c[i].textContent = fmtCash(TP.save.cash); });
+  TP.on('levelUp', function (l) { UI.banner('LEVEL ' + l + '!', 'New rigs and venues may be unlocked', { kind: 'good', ms: 2200 }); AU.sfx('coin'); });
+}
+/** Boot the game (main.js calls this). Safe to call once; returns a Promise resolved when the menu is up. */
+TP.boot = function () {
+  if (TP.booted) return Promise.resolve();
+  TP.booted = true;
+  if (typeof THREE === 'undefined') {
+    var l = $('loading'); if (l) l.innerHTML = '<div class="load-msg">Could not load the 3D engine. Check your connection and reload.</div>';
+    return Promise.reject(new Error('THREE missing'));
+  }
+  TP.debugMode = /debug/.test(location.hash || '');
+  initRenderer();
+  bindInput();
+  bindUiChrome();
+  // shop items for every buyable vehicle
+  Object.keys(TP.vehicles).forEach(function (id) { var v = TP.vehicles[id]; if (v.price > 0 && !v.hidden && !TP.shop.get('veh:' + id)) TP.shop.add(TP.shop.vehicleItem(id)); });
+  // upgrades as shop items too (category 'upgrades'), applied to the active vehicle
+  Object.keys(TP.upgrades).forEach(function (uid) {
+    if (TP.shop.get('upg:' + uid)) return;
+    var u = TP.upgrades[uid];
+    TP.shop.add({ id: 'upg:' + uid, category: 'upgrades', name: u.name, desc: (u.desc || '') + ' (for your active rig — see Garage)', price: u.levels[0] ? u.levels[0].price : 0, levelReq: 1, consumable: true, hidden: true });
+  });
+  var fontsReady = (document.fonts && document.fonts.ready) ? Promise.race([document.fonts.ready, new Promise(function (r) { setTimeout(r, 1500); })]) : Promise.resolve();
+  return fontsReady.then(function () {
+    TP.loadVenue('county_fair');
+    requestAnimationFrame(frame);
+    TP.toMenu();
+    var l = $('loading'); if (l) { l.classList.add('done'); setTimeout(function () { l.remove(); }, 600); }
+    if (TP.debugMode) { W.TPDEBUG = TP.debug; console.log('[TP] debug mode: TP.debug', TP.debug.listTypes()); }
+    TP.emit('boot');
+  }).catch(function (e) { console.error('[TP] boot failed', e); });
+};
 })();
