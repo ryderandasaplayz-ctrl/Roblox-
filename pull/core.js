@@ -1121,5 +1121,836 @@ TP.addUpgrade('driveline', { name: 'Driveline Armor', slot: 'driveline', desc: '
 TP.addUpgrade('boost_kit', { name: 'Boost Kit', slot: 'boost', desc: 'An extra water-meth or nitrous shot per pull.', appliesTo: { boostOnly: true },
   levels: [{ price: 5000, effect: { boostShotsAdd: 1 } }, { price: 12000, levelReq: 5, effect: { boostShotsAdd: 1, boostMult: 1.08 } }] });
 
-/*__PART_C__*/
+/* ---------------------------------------------------------------------------
+ * 10. LOW-POLY TOOLKIT  TP.lowpoly   (requires THREE at call time)
+ *   Builders return NON-INDEXED BufferGeometry with flat normals and a per-vertex
+ *   'color' attribute (sRGB hex converted to linear), already transformed by
+ *   o = {x,y,z, rx,ry,rz, sx,sy,sz}. Merge many into ONE mesh with TP.lowpoly.builder().
+ * ------------------------------------------------------------------------- */
+var LP = TP.lowpoly = {};
+var _colCache = {};
+LP.color = function (c) {
+  if (c && c.isColor) return c;
+  var key = String(c);
+  var col = _colCache[key];
+  if (!col) { col = new THREE.Color(c == null ? 0xffffff : c); col.convertSRGBToLinear(); _colCache[key] = col; }
+  return col;
+};
+var _m4 = null, _eul = null, _q = null, _sv = null, _pv = null;
+function xform(g, o) {
+  if (!o) return g;
+  if (!_m4) { _m4 = new THREE.Matrix4(); _eul = new THREE.Euler(); _q = new THREE.Quaternion(); _sv = new THREE.Vector3(); _pv = new THREE.Vector3(); }
+  if (o.rx || o.ry || o.rz || o.sx || o.sy || o.sz || o.x || o.y || o.z) {
+    _eul.set(o.rx || 0, o.ry || 0, o.rz || 0, o.order || 'XYZ'); _q.setFromEuler(_eul);
+    _sv.set(o.sx || 1, o.sy || 1, o.sz || 1); _pv.set(o.x || 0, o.y || 0, o.z || 0);
+    _m4.compose(_pv, _q, _sv); g.applyMatrix4(_m4);
+  }
+  return g;
+}
+function finishGeo(g, color, o) {
+  if (g.index) g = g.toNonIndexed();
+  g.deleteAttribute('normal');
+  xform(g, o);
+  g.computeVertexNormals();
+  LP.paint(g, color);
+  return g;
+}
+/** Set (or replace) the whole geometry's vertex color. */
+LP.paint = function (g, color) {
+  var c = LP.color(color), n = g.attributes.position.count, arr = new Float32Array(n * 3);
+  for (var i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return g;
+};
+LP.box = function (w, h, d, color, o) { return finishGeo(new THREE.BoxGeometry(w, h, d), color, o); };
+/** Cylinder: axis Y by default, o.axis = 'x' | 'z' to lay it down. */
+LP.cyl = function (rTop, rBot, h, seg, color, o) {
+  var g = new THREE.CylinderGeometry(rTop, rBot, h, seg || 8, 1);
+  o = o || {};
+  if (o.axis === 'x') g.rotateZ(Math.PI / 2); else if (o.axis === 'z') g.rotateX(Math.PI / 2);
+  return finishGeo(g, color, o);
+};
+LP.cone = function (r, h, seg, color, o) { return LP.cyl(0.0001, r, h, seg, color, o); };
+LP.sphere = function (r, color, o) { return finishGeo(new THREE.IcosahedronGeometry(r, (o && o.detail) || 0), color, o); };
+/** Wedge: box whose top slopes down toward +X. slope 0..1 = how much of the height is cut at the +X end. */
+LP.wedge = function (w, h, d, color, o) {
+  var g = new THREE.BoxGeometry(w, h, d), p = g.attributes.position, slope = (o && o.slope != null) ? o.slope : 0.7;
+  for (var i = 0; i < p.count; i++) if (p.getY(i) > 0 && p.getX(i) > 0) p.setY(i, h / 2 - h * slope);
+  return finishGeo(g, color, o);
+};
+/** Tapered box: top face scaled by (tx, tz) and shifted by o.shift (x) — cabs, hoods, roofs. */
+LP.taper = function (w, h, d, tx, tz, color, o) {
+  var g = new THREE.BoxGeometry(w, h, d), p = g.attributes.position, sh = (o && o.shift) || 0;
+  for (var i = 0; i < p.count; i++) if (p.getY(i) > 0) { p.setX(i, p.getX(i) * tx + sh); p.setZ(i, p.getZ(i) * tz); }
+  return finishGeo(g, color, o);
+};
+/** Truck cab: tapered greenhouse with a dark window band. Returns merged geometry. o.glass color. */
+LP.cab = function (w, h, d, color, o) {
+  o = o || {};
+  var lower = h * 0.45, upper = h - lower;
+  var parts = [
+    LP.box(w, lower, d, color, { x: o.x || 0, y: (o.y || 0) + lower / 2, z: o.z || 0 }),
+    LP.taper(w * 0.98, upper, d * 0.98, o.taperX || 0.78, o.taperZ || 0.9, o.glass || TP.palette.glass, { x: (o.x || 0) - w * 0.04, y: (o.y || 0) + lower + upper / 2, z: o.z || 0, shift: -w * 0.04 }),
+    LP.taper(w * 0.8, upper * 0.18, d * 0.9, 0.98, 0.98, color, { x: (o.x || 0) - w * 0.08, y: (o.y || 0) + h - upper * 0.05, z: o.z || 0 }),
+    LP.box(w * 0.06, upper * 0.9, d * 0.99, color, { x: (o.x || 0) - w * 0.05, y: (o.y || 0) + lower + upper * 0.45, z: o.z || 0 })
+  ];
+  return LP.merge(parts);
+};
+/** Tire with lugs, axis along Z (rolls about Z). o = {lugs, lugDepth, chevron, rim, rimColor, color, seg, hub}. */
+LP.tire = function (radius, width, o) {
+  o = o || {};
+  var seg = o.seg || 18, col = o.color || TP.palette.rubber, parts = [];
+  var core = radius - (o.lugDepth || radius * 0.06);
+  parts.push(LP.cyl(core, core, width, seg, col, { axis: 'z' }));
+  var lugs = o.lugs || seg, ld = o.lugDepth || radius * 0.06;
+  for (var i = 0; i < lugs; i++) {
+    var a = i / lugs * Math.PI * 2;
+    if (o.chevron) {
+      for (var sgn = -1; sgn <= 1; sgn += 2) {
+        parts.push(LP.box(ld * 2.2, ld * 1.6, width * 0.5, col, { x: Math.cos(a) * (core + ld * 0.3), y: Math.sin(a) * (core + ld * 0.3), z: sgn * width * 0.24, rz: a, ry: sgn * 0.5 }));
+      }
+    } else {
+      parts.push(LP.box(ld * 1.8, ld * 2, width * (i % 2 ? 0.92 : 0.7), col, { x: Math.cos(a) * (core + ld * 0.4), y: Math.sin(a) * (core + ld * 0.4), z: (i % 2 ? 0 : width * 0.12), rz: a }));
+    }
+  }
+  var rimR = o.rim || radius * 0.55, rc = o.rimColor || TP.palette.rim;
+  parts.push(LP.cyl(rimR, rimR, width * 1.02, Math.max(8, seg - 4), rc, { axis: 'z' }));
+  parts.push(LP.cyl(rimR * 0.35, rimR * 0.35, width * 1.08, 6, o.hub || TP.palette.steelDark, { axis: 'z' }));
+  for (var k = 0; k < 5; k++) { var b = k / 5 * Math.PI * 2; parts.push(LP.box(rimR * 0.12, rimR * 0.12, width * 1.06, TP.palette.chrome, { x: Math.cos(b) * rimR * 0.62, y: Math.sin(b) * rimR * 0.62 })); }
+  return LP.merge(parts);
+};
+/** Merge geometries (own implementation): position + normal + color (+ uv, filled with 0 if missing). */
+LP.merge = LP.mergeGeometries = function (geoms) {
+  var list = [], total = 0, hasUV = false, i;
+  for (i = 0; i < geoms.length; i++) {
+    var g = geoms[i]; if (!g) continue;
+    if (g.index) g = g.toNonIndexed();
+    if (!g.attributes.normal) g.computeVertexNormals();
+    if (!g.attributes.color) LP.paint(g, 0xffffff);
+    if (g.attributes.uv) hasUV = true;
+    list.push(g); total += g.attributes.position.count;
+  }
+  var pos = new Float32Array(total * 3), nor = new Float32Array(total * 3), col = new Float32Array(total * 3), uv = hasUV ? new Float32Array(total * 2) : null;
+  var off = 0;
+  for (i = 0; i < list.length; i++) {
+    var a = list[i].attributes, n = a.position.count;
+    pos.set(a.position.array.subarray ? a.position.array.subarray(0, n * 3) : a.position.array, off * 3);
+    nor.set(a.normal.array, off * 3);
+    col.set(a.color.array, off * 3);
+    if (uv && a.uv) uv.set(a.uv.array, off * 2);
+    off += n;
+    list[i].dispose();
+  }
+  var out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  if (uv) out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  out.computeBoundingSphere();
+  return out;
+};
+var _matCache = {};
+/** Shared materials. LP.mat('vc') = flat vertex-color standard material. LP.mat(hex|css, {rough, metal, emissive}). */
+LP.mat = function (c, o) {
+  o = o || {};
+  var key = String(c) + '|' + JSON.stringify(o);
+  if (_matCache[key]) return _matCache[key];
+  var m;
+  if (c === 'vc') m = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: o.rough != null ? o.rough : 0.82, metalness: o.metal || 0 });
+  else m = new THREE.MeshStandardMaterial({ color: LP.color(c), flatShading: true, roughness: o.rough != null ? o.rough : 0.8, metalness: o.metal || 0 });
+  if (o.emissive != null) { m.emissive = LP.color(o.emissive); m.emissiveIntensity = o.emissiveIntensity || 1; }
+  if (o.transparent) { m.transparent = true; m.opacity = o.opacity != null ? o.opacity : 0.6; m.depthWrite = false; }
+  if (o.side === 'double') m.side = THREE.DoubleSide;
+  _matCache[key] = m;
+  return m;
+};
+/** Mesh from a geometry with the shared vertex-color material. o = {shadow (cast), receive, mat}. */
+LP.mesh = function (geo, o) {
+  o = o || {};
+  var m = new THREE.Mesh(geo, o.mat || LP.mat('vc', o.matOpts));
+  m.castShadow = !!o.shadow; m.receiveShadow = !!o.receive;
+  return m;
+};
+/** Accumulating builder: b.box(...).cyl(...).add(geo); b.mesh(opts) / b.geometry(). Chainable. */
+LP.builder = function () {
+  var parts = [];
+  var b = {
+    parts: parts,
+    add: function (g) { if (g) parts.push(g); return b; },
+    box: function () { parts.push(LP.box.apply(null, arguments)); return b; },
+    cyl: function () { parts.push(LP.cyl.apply(null, arguments)); return b; },
+    cone: function () { parts.push(LP.cone.apply(null, arguments)); return b; },
+    sphere: function () { parts.push(LP.sphere.apply(null, arguments)); return b; },
+    wedge: function () { parts.push(LP.wedge.apply(null, arguments)); return b; },
+    taper: function () { parts.push(LP.taper.apply(null, arguments)); return b; },
+    cab: function () { parts.push(LP.cab.apply(null, arguments)); return b; },
+    geometry: function () { return LP.merge(parts); },
+    mesh: function (o) { return LP.mesh(LP.merge(parts), o); }
+  };
+  return b;
+};
+/** Canvas texture. draw(ctx, w, h). o = {repeat:[x,y], nearest, anisotropy}. */
+LP.canvasTexture = function (w, h, draw, o) {
+  o = o || {};
+  var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  var ctx = cv.getContext('2d');
+  draw(ctx, w, h);
+  var t = new THREE.CanvasTexture(cv);
+  t.encoding = THREE.sRGBEncoding;
+  if (o.repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(o.repeat[0], o.repeat[1]); }
+  t.anisotropy = o.anisotropy || 4;
+  if (o.nearest) t.magFilter = THREE.NearestFilter;
+  t.userData.canvas = cv; t.userData.ctx = ctx;
+  return t;
+};
+/** Textured plane (decal) facing +Z (or o.face 'x'/'-x'/'-z'/'up'). Transparent, polygon-offset to sit on surfaces. */
+LP.decal = function (tex, w, h, o) {
+  o = o || {};
+  var m = new THREE.MeshStandardMaterial({ map: tex, transparent: true, roughness: o.rough != null ? o.rough : 0.6, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, alphaTest: o.alphaTest || 0.02 });
+  if (o.emissive) { m.emissive = new THREE.Color(0xffffff); m.emissiveMap = tex; m.emissiveIntensity = o.emissive; }
+  var g = new THREE.PlaneGeometry(w, h);
+  var mesh = new THREE.Mesh(g, m);
+  if (o.face === 'x') mesh.rotation.y = Math.PI / 2;
+  else if (o.face === '-x') mesh.rotation.y = -Math.PI / 2;
+  else if (o.face === '-z') mesh.rotation.y = Math.PI;
+  else if (o.face === 'up') mesh.rotation.x = -Math.PI / 2;
+  mesh.position.set(o.x || 0, o.y || 0, o.z || 0);
+  mesh.receiveShadow = !!o.receive;
+  return mesh;
+};
+/** Racing number roundel / panel texture. o = {fg, bg, outline, shape:'circle'|'square'|'plain', font}. */
+LP.numberTexture = function (num, o) {
+  o = o || {};
+  return LP.canvasTexture(128, 128, function (c, w, h) {
+    c.clearRect(0, 0, w, h);
+    if (o.shape !== 'plain') {
+      c.fillStyle = o.bg || '#f3efe6';
+      c.beginPath();
+      if (o.shape === 'square') c.rect(6, 6, w - 12, h - 12); else c.arc(w / 2, h / 2, w / 2 - 6, 0, Math.PI * 2);
+      c.fill();
+      c.lineWidth = 6; c.strokeStyle = o.ring || '#17140f'; c.stroke();
+    }
+    c.font = '900 ' + (String(num).length > 2 ? 54 : 72) + 'px ' + (o.font || '"Saira Condensed", "Arial Narrow", Impact, sans-serif');
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    if (o.outline) { c.lineWidth = 8; c.strokeStyle = o.outline; c.strokeText(String(num), w / 2, h / 2 + 4); }
+    c.fillStyle = o.fg || '#17140f'; c.fillText(String(num), w / 2, h / 2 + 4);
+  });
+};
+/** Text texture for signs/banners. o = {w,h, bg, fg, font, size, stroke, align}. */
+LP.textTexture = function (text, o) {
+  o = o || {};
+  var W2 = o.w || 512, H2 = o.h || 128;
+  return LP.canvasTexture(W2, H2, function (c, w, h) {
+    if (o.bg) { c.fillStyle = o.bg; c.fillRect(0, 0, w, h); } else c.clearRect(0, 0, w, h);
+    if (o.border) { c.lineWidth = o.borderWidth || 8; c.strokeStyle = o.border; c.strokeRect(4, 4, w - 8, h - 8); }
+    c.font = (o.weight || '900') + ' ' + (o.size || Math.round(h * 0.62)) + 'px ' + (o.font || '"Saira Condensed", "Arial Narrow", Impact, sans-serif');
+    c.textAlign = o.align || 'center'; c.textBaseline = 'middle';
+    var x = o.align === 'left' ? h * 0.2 : w / 2;
+    if (o.stroke) { c.lineWidth = o.strokeWidth || 6; c.strokeStyle = o.stroke; c.strokeText(text, x, h / 2 + 2); }
+    c.fillStyle = o.fg || '#17140f'; c.fillText(text, x, h / 2 + 2);
+  }, o);
+};
+/** Draw a livery side panel: base, pattern (stripe|flames|twoTone|checker|farm|plain), number, brand. Returns texture. */
+LP.liveryTexture = function (lv, o) {
+  o = o || {};
+  var W2 = o.w || 512, H2 = o.h || 160;
+  return LP.canvasTexture(W2, H2, function (c, w, h) {
+    c.clearRect(0, 0, w, h);
+    var acc = lv.accent || '#ffd23f', trim = lv.trim || '#17140f', pat = lv.pattern || 'stripe';
+    if (o.fill) { c.fillStyle = lv.base || '#c8342b'; c.fillRect(0, 0, w, h); }
+    c.save();
+    if (pat === 'stripe') {
+      c.fillStyle = acc; c.fillRect(0, h * 0.52, w, h * 0.16);
+      c.fillStyle = trim; c.fillRect(0, h * 0.7, w, h * 0.05);
+    } else if (pat === 'twoTone') {
+      c.fillStyle = acc; c.fillRect(0, h * 0.58, w, h * 0.42);
+      c.fillStyle = trim; c.fillRect(0, h * 0.55, w, h * 0.04);
+    } else if (pat === 'checker') {
+      var s = h / 6;
+      for (var cx = 0; cx < w * 0.45; cx += s) for (var cy = h * 0.5; cy < h; cy += s) if (((cx + cy) / s | 0) % 2 === 0) { c.fillStyle = acc; c.fillRect(w - cx - s, cy, s, s); }
+    } else if (pat === 'flames') {
+      // licks of flame from the front (+x = right side of the texture)
+      for (var layer = 0; layer < 2; layer++) {
+        c.fillStyle = layer === 0 ? acc : (lv.flame2 || '#ff6a1a');
+        c.beginPath(); c.moveTo(w, h * 0.35);
+        var tips = 6, sc = layer === 0 ? 1 : 0.7;
+        for (var k = 0; k <= tips; k++) {
+          var ty = h * (0.3 + 0.6 * k / tips);
+          var len = w * (0.35 + 0.35 * Math.abs(Math.sin(k * 1.7 + 0.5))) * sc;
+          c.quadraticCurveTo(w - len * 0.5, ty - h * 0.08, w - len, ty);
+          c.quadraticCurveTo(w - len * 0.55, ty + h * 0.02, w - len * 0.2, ty + h * 0.07);
+        }
+        c.lineTo(w, h * 0.95); c.closePath(); c.fill();
+      }
+    } else if (pat === 'farm') {
+      c.fillStyle = acc; c.fillRect(0, h * 0.62, w, h * 0.1);
+    }
+    c.restore();
+    // brand
+    if (lv.brandText !== false && (lv.brandText || o.brand)) {
+      c.font = '800 ' + Math.round(h * 0.2) + 'px "Saira Condensed", "Arial Narrow", Impact, sans-serif';
+      c.textAlign = 'left'; c.textBaseline = 'middle';
+      c.fillStyle = trim === '#17140f' && pat !== 'twoTone' ? acc : trim;
+      c.fillText(String(lv.brandText || o.brand).toUpperCase(), w * 0.05, h * 0.3);
+    }
+    // number roundel
+    if (lv.number != null && lv.number !== '' && o.number !== false) {
+      var r = h * 0.3, nx = o.numberX != null ? o.numberX * w : w * 0.62, ny = h * 0.36;
+      c.fillStyle = lv.numberBg || '#f3efe6'; c.beginPath(); c.arc(nx, ny, r, 0, Math.PI * 2); c.fill();
+      c.lineWidth = h * 0.03; c.strokeStyle = trim; c.stroke();
+      c.font = '900 ' + Math.round(r * (String(lv.number).length > 2 ? 0.95 : 1.35)) + 'px "Saira Condensed", "Arial Narrow", Impact, sans-serif';
+      c.textAlign = 'center'; c.fillStyle = lv.numberFg || '#17140f'; c.fillText(String(lv.number), nx, ny + r * 0.08);
+    }
+  });
+};
+LP.palette = TP.palette;
+
+/* ---------------------------------------------------------------------------
+ * 11. RENDERER, SKY, LOOP, QUALITY
+ * ------------------------------------------------------------------------- */
+TP.time = 0; TP.dt = 0; TP.realDt = 0; TP.timeScale = 1; TP.paused = false; TP.frameCount = 0;
+TP.quality = 'high';
+TP.tmp = {};   // reusable vectors etc. (filled at boot) — never keep references across frames
+var R3 = TP.r3 = { updaters: [], fpsSamples: [], lowFpsT: 0 };
+/** Run fn(dt, realDt) every frame (after the pull, before render). Returns an unsubscribe function. */
+TP.onFrame = function (fn) { R3.updaters.push(fn); return function () { var i = R3.updaters.indexOf(fn); if (i >= 0) R3.updaters.splice(i, 1); }; };
+
+function pickQuality() {
+  var s = TP.save.settings.quality;
+  if (s === 'high' || s === 'low') return s;
+  var mobile = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent || '') || (W.matchMedia && W.matchMedia('(pointer: coarse)').matches);
+  var cores = navigator.hardwareConcurrency || 4;
+  return (mobile && cores <= 4) ? 'low' : 'high';
+}
+TP.setQuality = function (q) {
+  TP.quality = q === 'low' ? 'low' : 'high';
+  if (!TP.renderer) return;
+  TP.renderer.setPixelRatio(Math.min(W.devicePixelRatio || 1, TP.quality === 'high' ? 1.5 : 1));
+  TP.renderer.shadowMap.enabled = TP.quality === 'high';
+  if (TP.lights && TP.lights.sun) TP.lights.sun.castShadow = TP.quality === 'high';
+  TP.scene && TP.scene.traverse(function (o) { if (o.material && !Array.isArray(o.material)) o.material.needsUpdate = true; });
+  onResize();
+  TP.emit('quality', TP.quality);
+};
+
+var SKY_VS = 'varying vec3 vDir; void main(){ vDir = normalize((modelMatrix * vec4(position,1.0)).xyz - cameraPosition); vec4 p = projectionMatrix * modelViewMatrix * vec4(position,1.0); gl_Position = p.xyww; }';
+var SKY_FS = [
+  'uniform vec3 top; uniform vec3 horizon; uniform vec3 bottom; uniform vec3 sunDir; uniform vec3 sunColor; uniform float sunSize; uniform float haze;',
+  'varying vec3 vDir;',
+  'void main(){',
+  '  vec3 d = normalize(vDir); float h = d.y;',
+  '  vec3 col = h > 0.0 ? mix(horizon, top, pow(clamp(h, 0.0, 1.0), 0.55)) : mix(horizon, bottom, pow(clamp(-h * 3.0, 0.0, 1.0), 0.7));',
+  '  float s = max(dot(d, normalize(sunDir)), 0.0);',
+  '  col += sunColor * (pow(s, 900.0 / sunSize) * 2.2 + pow(s, 12.0) * 0.25 * haze);',
+  '  col = mix(col, horizon, (1.0 - smoothstep(0.0, 0.18, abs(h))) * 0.35 * haze);',
+  '  gl_FragColor = vec4(col, 1.0);',
+  '  #include <tonemapping_fragment>',
+  '  #include <encodings_fragment>',
+  '}'].join('\n');
+
+function initRenderer() {
+  var host = document.getElementById('game');
+  TP.quality = pickQuality();
+  var renderer;
+  renderer = new THREE.WebGLRenderer({ antialias: TP.quality === 'high', powerPreference: 'high-performance', alpha: false, stencil: false });
+  renderer.setPixelRatio(Math.min(W.devicePixelRatio || 1, TP.quality === 'high' ? 1.5 : 1));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.12;
+  renderer.shadowMap.enabled = TP.quality === 'high';
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  host.appendChild(renderer.domElement);
+  renderer.domElement.id = 'gl';
+  TP.renderer = renderer;
+  var scene = TP.scene = new THREE.Scene();
+  var cam = TP.camera = new THREE.PerspectiveCamera(46, 1, 0.1, 1500);
+  cam.position.set(10, 3, 14); cam.lookAt(0, 1, 0);
+  var hemi = new THREE.HemisphereLight(0xdcefff, 0x8a6a48, 0.85);
+  var sun = new THREE.DirectionalLight(0xfff0d8, 2.4);
+  sun.castShadow = TP.quality === 'high';
+  sun.shadow.mapSize.set(1024, 1024);
+  var sc = sun.shadow.camera; sc.left = -16; sc.right = 16; sc.top = 12; sc.bottom = -12; sc.near = 1; sc.far = 220;
+  sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.03;
+  scene.add(hemi, sun, sun.target);
+  TP.lights = { sun: sun, hemi: hemi, sunDir: new THREE.Vector3(-0.45, 0.62, 0.64).normalize() };
+  // sky dome
+  var skyMat = new THREE.ShaderMaterial({
+    uniforms: { top: { value: new THREE.Color() }, horizon: { value: new THREE.Color() }, bottom: { value: new THREE.Color() },
+      sunDir: { value: TP.lights.sunDir.clone() }, sunColor: { value: new THREE.Color(1, 0.9, 0.7) }, sunSize: { value: 1 }, haze: { value: 1 } },
+    vertexShader: SKY_VS, fragmentShader: SKY_FS, side: THREE.BackSide, depthWrite: false, fog: false
+  });
+  var sky = new THREE.Mesh(new THREE.SphereGeometry(900, 24, 12), skyMat);
+  sky.frustumCulled = false; sky.renderOrder = -10;
+  scene.add(sky);
+  TP.sky = { mesh: sky, mat: skyMat };
+  TP.setSky({});
+  var T = TP.tmp;
+  T.v1 = new THREE.Vector3(); T.v2 = new THREE.Vector3(); T.v3 = new THREE.Vector3(); T.v4 = new THREE.Vector3();
+  T.q1 = new THREE.Quaternion(); T.m1 = new THREE.Matrix4(); T.e1 = new THREE.Euler(); T.c1 = new THREE.Color(); T.s1 = new THREE.Vector3(1, 1, 1);
+  W.addEventListener('resize', onResize);
+  W.addEventListener('orientationchange', function () { setTimeout(onResize, 120); });
+  if (W.visualViewport) W.visualViewport.addEventListener('resize', onResize);
+  onResize();
+}
+/** Sky & light setup. o = {top, horizon, bottom, sun (0xhex light color), sunIntensity, hemiSky, hemiGround, hemiIntensity,
+ *  fogNear, fogFar, sunDir:[x,y,z], haze, exposure}. Colors are sRGB hex. */
+TP.setSky = function (o) {
+  o = o || {};
+  var u = TP.sky.mat.uniforms;
+  u.top.value.copy(LP.color(o.top != null ? o.top : 0x3d8fd8));
+  u.horizon.value.copy(LP.color(o.horizon != null ? o.horizon : 0xcfe6f2));
+  u.bottom.value.copy(LP.color(o.bottom != null ? o.bottom : 0x9fb5a0));
+  u.sunColor.value.copy(LP.color(o.sunGlow != null ? o.sunGlow : 0xfff1d0));
+  u.haze.value = o.haze != null ? o.haze : 1;
+  u.sunSize.value = o.sunSize || 1;
+  if (o.sunDir) TP.lights.sunDir.set(o.sunDir[0], o.sunDir[1], o.sunDir[2]).normalize();
+  u.sunDir.value.copy(TP.lights.sunDir);
+  TP.lights.sun.color.copy(LP.color(o.sun != null ? o.sun : 0xfff0d8));
+  TP.lights.sun.intensity = o.sunIntensity != null ? o.sunIntensity : 2.4;
+  TP.lights.hemi.color.copy(LP.color(o.hemiSky != null ? o.hemiSky : 0xdcefff));
+  TP.lights.hemi.groundColor.copy(LP.color(o.hemiGround != null ? o.hemiGround : 0x8a6a48));
+  TP.lights.hemi.intensity = o.hemiIntensity != null ? o.hemiIntensity : 0.85;
+  TP.scene.fog = new THREE.Fog(LP.color(o.fog != null ? o.fog : (o.horizon != null ? o.horizon : 0xcfe6f2)).clone(), o.fogNear || 140, o.fogFar || 700);
+  TP.renderer.toneMappingExposure = o.exposure || 1.12;
+  TP.scene.background = null;
+};
+function onResize() {
+  if (!TP.renderer) return;
+  var host = document.getElementById('game');
+  var w = host.clientWidth || W.innerWidth, h = host.clientHeight || W.innerHeight;
+  TP.renderer.setSize(w, h, false);
+  TP.renderer.domElement.style.width = w + 'px'; TP.renderer.domElement.style.height = h + 'px';
+  TP.camera.aspect = w / Math.max(1, h);
+  TP.portrait = h > w * 1.05;
+  TP.camera.updateProjectionMatrix();
+  TP.viewW = w; TP.viewH = h;
+  if (TP.fx && TP.fx._resize) TP.fx._resize();
+  document.documentElement.classList.toggle('portrait', !!TP.portrait);
+  TP.emit('resize', w, h);
+}
+TP.resize = onResize;
+
+var lastT = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  var raw = lastT ? (now - lastT) / 1000 : 0.016;
+  lastT = now;
+  stepFrame(Math.min(Math.max(raw, 0), 0.05), raw);
+  if (TP.renderer) TP.renderer.render(TP.scene, TP.camera);
+}
+function stepFrame(realDt, rawDt) {
+  TP.realDt = realDt;
+  TP.dt = TP.paused ? 0 : realDt * TP.timeScale;
+  TP.time += TP.dt;
+  TP.frameCount++;
+  // fps meter (real frames)
+  var fs = R3.fpsSamples; fs.push(rawDt || realDt); if (fs.length > 60) fs.shift();
+  try { pollInput(realDt); } catch (e) { console.error(e); }
+  if (R3.pullUpdate) { try { R3.pullUpdate(TP.dt, realDt); } catch (e) { console.error('[TP] pull update failed', e); R3.pullUpdate = null; } }
+  for (var i = 0; i < R3.updaters.length; i++) { try { R3.updaters[i](TP.dt, realDt); } catch (e) { console.error('[TP] frame updater failed', e); } }
+  TP.emit('frame', TP.dt, realDt);
+  if (TP.fx) TP.fx.update(TP.dt);
+  if (TP.cam) TP.cam.update(realDt, TP.dt);
+  if (TP.audio) TP.audio.update(realDt);
+  autoQuality(realDt);
+}
+function autoQuality(dt) {
+  if (TP.save.settings.quality !== 'auto' || TP.quality === 'low' || !R3.pullUpdate) { R3.lowFpsT = 0; return; }
+  var fs = R3.fpsSamples; if (fs.length < 60) return;
+  var avg = 0; for (var i = 0; i < fs.length; i++) avg += fs[i]; avg /= fs.length;
+  if (avg > 1 / 26) R3.lowFpsT += dt; else R3.lowFpsT = Math.max(0, R3.lowFpsT - dt);
+  if (R3.lowFpsT > 4) { R3.lowFpsT = 0; TP.setQuality('low'); TP.ui && TP.ui.toast('Switched to Low graphics for smoother pulls'); }
+}
+TP.fps = function () { var fs = R3.fpsSamples; if (!fs.length) return 0; var a = 0; for (var i = 0; i < fs.length; i++) a += fs[i]; return Math.round(fs.length / a); };
+
+/* ---------------------------------------------------------------------------
+ * 12. PARTICLES  TP.fx  — pooled THREE.Points per type, one draw call each
+ * ------------------------------------------------------------------------- */
+var FX_VS = [
+  'attribute float size; attribute float alpha; attribute vec3 pcolor; attribute float spin;',
+  'uniform float scale; varying float vA; varying vec3 vC; varying float vS;',
+  'void main(){ vA = alpha; vC = pcolor; vS = spin; vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+  '  gl_PointSize = size * scale / max(0.5, -mv.z); gl_Position = projectionMatrix * mv; }'].join('\n');
+var FX_FS = [
+  'uniform sampler2D map; varying float vA; varying vec3 vC; varying float vS;',
+  'void main(){ vec2 uv = gl_PointCoord - 0.5; float c = cos(vS), s = sin(vS); uv = vec2(c*uv.x - s*uv.y, s*uv.x + c*uv.y) + 0.5;',
+  '  vec4 t = texture2D(map, uv); gl_FragColor = vec4(vC * t.rgb, t.a * vA); if (gl_FragColor.a < 0.004) discard;',
+  '  #include <tonemapping_fragment>',
+  '  #include <encodings_fragment>',
+  '}'].join('\n');
+function fxTexture(kind) {
+  return LP.canvasTexture(64, 64, function (c, w, h) {
+    c.clearRect(0, 0, w, h);
+    if (kind === 'puff') {
+      for (var i = 0; i < 7; i++) {
+        var x = w / 2 + Math.cos(i * 2.4) * w * 0.14 * (i ? 1 : 0), y = h / 2 + Math.sin(i * 2.4) * h * 0.14 * (i ? 1 : 0), r = w * (i ? 0.26 : 0.34);
+        var g = c.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, 'rgba(255,255,255,0.55)'); g.addColorStop(0.6, 'rgba(255,255,255,0.25)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+        c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+      }
+    } else if (kind === 'flame') {
+      var g2 = c.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+      g2.addColorStop(0, 'rgba(255,255,255,1)'); g2.addColorStop(0.35, 'rgba(255,230,160,0.9)'); g2.addColorStop(1, 'rgba(255,120,20,0)');
+      c.fillStyle = g2; c.fillRect(0, 0, w, h);
+    } else if (kind === 'chunk') {
+      c.fillStyle = '#fff'; c.beginPath(); c.moveTo(w * 0.2, h * 0.3); c.lineTo(w * 0.7, h * 0.15); c.lineTo(w * 0.85, h * 0.6); c.lineTo(w * 0.45, h * 0.85); c.lineTo(w * 0.15, h * 0.65); c.closePath(); c.fill();
+    } else {
+      c.fillStyle = '#fff'; c.fillRect(w * 0.18, h * 0.3, w * 0.64, h * 0.4);
+    }
+  });
+}
+var FX_TYPES = {
+  smoke:    { max: 650, tex: 'puff', blend: 'normal', life: [1.6, 3.0], size: [0.9, 4.2], c0: 0x1a1714, c1: 0x5a5550, alpha: 0.75, drag: 1.1, gravity: -0.9, spin: 0.6 },
+  steam:    { max: 160, tex: 'puff', blend: 'normal', life: [0.8, 1.6], size: [0.6, 2.4], c0: 0xffffff, c1: 0xd8d8d8, alpha: 0.45, drag: 1.4, gravity: -0.6, spin: 0.5 },
+  dust:     { max: 420, tex: 'puff', blend: 'normal', life: [1.2, 2.6], size: [0.8, 3.6], c0: 0xa9825a, c1: 0xc9ab85, alpha: 0.55, drag: 1.6, gravity: -0.15, spin: 0.4 },
+  dirt:     { max: 700, tex: 'chunk', blend: 'normal', life: [0.6, 1.3], size: [0.16, 0.12], c0: 0x5e3b1f, c1: 0x7a5230, alpha: 1, drag: 0.25, gravity: 9.8, spin: 6 },
+  flame:    { max: 320, tex: 'flame', blend: 'add', life: [0.12, 0.32], size: [0.7, 1.5], c0: 0xfff2b0, c1: 0xff4a10, alpha: 1, drag: 2, gravity: -2, spin: 2 },
+  spark:    { max: 240, tex: 'flame', blend: 'add', life: [0.3, 0.8], size: [0.18, 0.05], c0: 0xffe9a0, c1: 0xff6a1a, alpha: 1, drag: 0.6, gravity: 6, spin: 0 },
+  confetti: { max: 420, tex: 'square', blend: 'normal', life: [2.5, 4.5], size: [0.3, 0.3], c0: 0xffffff, c1: 0xffffff, alpha: 1, drag: 1.8, gravity: 2.2, spin: 8, keepColor: true }
+};
+function FxPool(name, cfg) {
+  var low = TP.quality === 'low';
+  var n = Math.max(16, Math.round(cfg.max * (low ? 0.5 : 1)));
+  this.name = name; this.cfg = cfg; this.n = n; this.head = 0; this.alive = 0;
+  var g = new THREE.BufferGeometry();
+  this.pos = new Float32Array(n * 3); this.col = new Float32Array(n * 3); this.size = new Float32Array(n); this.alpha = new Float32Array(n); this.spin = new Float32Array(n);
+  this.vel = new Float32Array(n * 3); this.life = new Float32Array(n); this.max = new Float32Array(n); this.s0 = new Float32Array(n); this.s1 = new Float32Array(n);
+  this.spinV = new Float32Array(n); this.base = new Float32Array(n * 3);
+  g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('pcolor', new THREE.BufferAttribute(this.col, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('size', new THREE.BufferAttribute(this.size, 1).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('alpha', new THREE.BufferAttribute(this.alpha, 1).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('spin', new THREE.BufferAttribute(this.spin, 1).setUsage(THREE.DynamicDrawUsage));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
+  this.geo = g;
+  this.mat = new THREE.ShaderMaterial({
+    uniforms: { map: { value: fxTexture(cfg.tex) }, scale: { value: 400 } },
+    vertexShader: FX_VS, fragmentShader: FX_FS, transparent: true, depthWrite: false,
+    blending: cfg.blend === 'add' ? THREE.AdditiveBlending : THREE.NormalBlending
+  });
+  this.points = new THREE.Points(g, this.mat);
+  this.points.frustumCulled = false;
+  this.points.renderOrder = cfg.blend === 'add' ? 5 : 4;
+  this.c0 = LP.color(cfg.c0).clone(); this.c1 = LP.color(cfg.c1).clone();
+}
+FxPool.prototype.emit = function (x, y, z, vx, vy, vz, sizeMul, lifeMul, color) {
+  var i = this.head; this.head = (this.head + 1) % this.n;
+  var c = this.cfg, r = Math.random();
+  this.pos[i * 3] = x; this.pos[i * 3 + 1] = y; this.pos[i * 3 + 2] = z;
+  this.vel[i * 3] = vx; this.vel[i * 3 + 1] = vy; this.vel[i * 3 + 2] = vz;
+  var L = (c.life[0] + (c.life[1] - c.life[0]) * r) * (lifeMul || 1);
+  this.life[i] = L; this.max[i] = L;
+  var sm = sizeMul || 1;
+  this.s0[i] = c.size[0] * sm * (0.8 + Math.random() * 0.4); this.s1[i] = c.size[1] * sm * (0.8 + Math.random() * 0.4);
+  this.spin[i] = Math.random() * 6.28; this.spinV[i] = (Math.random() - 0.5) * c.spin;
+  if (color != null) { var cc = LP.color(color); this.base[i * 3] = cc.r; this.base[i * 3 + 1] = cc.g; this.base[i * 3 + 2] = cc.b; }
+  else this.base[i * 3] = -1;
+};
+FxPool.prototype.update = function (dt) {
+  var c = this.cfg, n = this.n, drag = Math.exp(-c.drag * dt), g = c.gravity * dt;
+  var c0 = this.c0, c1 = this.c1, alive = 0;
+  for (var i = 0; i < n; i++) {
+    var L = this.life[i];
+    if (L <= 0) { if (this.alpha[i] !== 0) { this.alpha[i] = 0; this.size[i] = 0; } continue; }
+    alive++;
+    L -= dt; this.life[i] = L;
+    var t = 1 - Math.max(L, 0) / this.max[i];
+    var i3 = i * 3;
+    this.vel[i3] *= drag; this.vel[i3 + 1] = this.vel[i3 + 1] * drag - g; this.vel[i3 + 2] *= drag;
+    this.pos[i3] += this.vel[i3] * dt; this.pos[i3 + 1] += this.vel[i3 + 1] * dt; this.pos[i3 + 2] += this.vel[i3 + 2] * dt;
+    if (c.gravity > 0 && this.pos[i3 + 1] < 0.03) { this.pos[i3 + 1] = 0.03; this.vel[i3] *= 0.5; this.vel[i3 + 1] *= -0.25; this.vel[i3 + 2] *= 0.5; }
+    this.size[i] = this.s0[i] + (this.s1[i] - this.s0[i]) * Math.sqrt(t);
+    var fadeIn = t < 0.08 ? t / 0.08 : 1;
+    this.alpha[i] = c.alpha * fadeIn * (1 - t) * (1 - t * 0.3);
+    this.spin[i] += this.spinV[i] * dt;
+    if (this.base[i3] >= 0) { this.col[i3] = this.base[i3]; this.col[i3 + 1] = this.base[i3 + 1]; this.col[i3 + 2] = this.base[i3 + 2]; }
+    else { this.col[i3] = c0.r + (c1.r - c0.r) * t; this.col[i3 + 1] = c0.g + (c1.g - c0.g) * t; this.col[i3 + 2] = c0.b + (c1.b - c0.b) * t; }
+    if (L <= 0) { this.alpha[i] = 0; this.size[i] = 0; }
+  }
+  this.alive = alive;
+  var a = this.geo.attributes;
+  a.position.needsUpdate = true; a.pcolor.needsUpdate = true; a.size.needsUpdate = true; a.alpha.needsUpdate = true; a.spin.needsUpdate = true;
+};
+FxPool.prototype.clear = function () { for (var i = 0; i < this.n; i++) { this.life[i] = 0; this.alpha[i] = 0; this.size[i] = 0; } };
+TP.fx = {
+  types: FX_TYPES, pools: {},
+  /** Register a particle type (call at load time or before first use). cfg like FX_TYPES entries. */
+  addType: function (name, cfg) { FX_TYPES[name] = cfg; },
+  pool: function (name) {
+    var p = TP.fx.pools[name];
+    if (!p) { var cfg = FX_TYPES[name]; if (!cfg) return null; p = TP.fx.pools[name] = new FxPool(name, cfg); TP.scene.add(p.points); TP.fx._resize(); }
+    return p;
+  },
+  /** Emit one particle: emit(type, x,y,z, vx,vy,vz, sizeMul?, lifeMul?, colorHex?) — allocation free. */
+  emit: function (type, x, y, z, vx, vy, vz, sizeMul, lifeMul, color) { var p = TP.fx.pool(type); if (p) p.emit(x, y, z, vx || 0, vy || 0, vz || 0, sizeMul, lifeMul, color); },
+  /** Emit n particles around a point with random spread. o = {spread, speed, up, sizeMul, lifeMul, color, colors:[...]} */
+  burst: function (type, x, y, z, n, o) {
+    o = o || {}; var p = TP.fx.pool(type); if (!p) return;
+    var sp = o.spread || 0.3, v = o.speed || 2, up = o.up != null ? o.up : 1;
+    for (var i = 0; i < n; i++) {
+      var col = o.colors ? o.colors[(Math.random() * o.colors.length) | 0] : o.color;
+      p.emit(x + (Math.random() - 0.5) * sp, y + (Math.random() - 0.5) * sp, z + (Math.random() - 0.5) * sp,
+        (Math.random() - 0.5) * v * 2 + (o.vx || 0), Math.random() * v * up + (o.vy || 0), (Math.random() - 0.5) * v * 2 + (o.vz || 0), o.sizeMul, o.lifeMul, col);
+    }
+  },
+  update: function (dt) { for (var k in TP.fx.pools) TP.fx.pools[k].update(dt); },
+  clear: function () { for (var k in TP.fx.pools) TP.fx.pools[k].clear(); },
+  count: function () { var n = 0; for (var k in TP.fx.pools) n += TP.fx.pools[k].alive; return n; },
+  _resize: function () {
+    if (!TP.renderer) return;
+    var h = TP.renderer.domElement.height;
+    var s = h / (2 * Math.tan(TP.camera.fov * Math.PI / 360));
+    for (var k in TP.fx.pools) TP.fx.pools[k].mat.uniforms.scale.value = s;
+  }
+};
+
+/* ---------------------------------------------------------------------------
+ * 13. AUDIO  TP.audio — WebAudio synthesis; starts only after a user gesture
+ * ------------------------------------------------------------------------- */
+var AU = TP.audio = { ctx: null, ready: false, master: null, voices: [], crowdLevel: 0.25, _crowd: null };
+AU.init = function () {
+  if (AU.ctx) { if (AU.ctx.state === 'suspended') { try { AU.ctx.resume(); } catch (e) {} } return true; }
+  try {
+    var AC = W.AudioContext || W.webkitAudioContext; if (!AC) return false;
+    var ctx = AU.ctx = new AC();
+    AU.master = ctx.createGain(); AU.master.gain.value = TP.save.settings.sound ? TP.save.settings.volume : 0;
+    var comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
+    AU.master.connect(comp); comp.connect(ctx.destination);
+    // shared noise buffer
+    var len = ctx.sampleRate * 2, buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    AU.noise = buf;
+    AU.ready = true;
+    AU.startCrowd();
+    TP.emit('audioReady');
+    return true;
+  } catch (e) { console.warn('[TP] audio unavailable', e); AU.ready = false; return false; }
+};
+AU.setMuted = function (m) { if (AU.master) AU.master.gain.setTargetAtTime(m ? 0 : TP.save.settings.volume, AU.ctx.currentTime, 0.05); };
+function noiseSrc() { var s = AU.ctx.createBufferSource(); s.buffer = AU.noise; s.loop = true; return s; }
+AU.startCrowd = function () {
+  if (!AU.ready || AU._crowd) return;
+  try {
+    var ctx = AU.ctx, n = noiseSrc(), bp = ctx.createBiquadFilter(), lp = ctx.createBiquadFilter(), g = ctx.createGain();
+    bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.5; lp.type = 'lowpass'; lp.frequency.value = 2400;
+    g.gain.value = 0;
+    n.connect(bp); bp.connect(lp); lp.connect(g); g.connect(AU.master); n.start();
+    // a second, lower murmur band
+    var n2 = noiseSrc(), bp2 = ctx.createBiquadFilter(), g2 = ctx.createGain();
+    bp2.type = 'bandpass'; bp2.frequency.value = 380; bp2.Q.value = 0.8; g2.gain.value = 0;
+    n2.connect(bp2); bp2.connect(g2); g2.connect(AU.master); n2.start();
+    AU._crowd = { g: g, g2: g2, bp: bp, cheer: 0 };
+  } catch (e) { console.warn(e); }
+};
+/** Crowd base level 0..1 */
+AU.crowd = function (level) { AU.crowdLevel = clamp(level, 0, 1); };
+/** Cheer swell 0..1 (decays) */
+AU.cheer = function (amount) { if (AU._crowd) AU._crowd.cheer = Math.min(1.5, AU._crowd.cheer + (amount == null ? 1 : amount)); };
+AU.update = function (dt) {
+  if (!AU.ready || !AU._crowd) return;
+  var c = AU._crowd, t = AU.ctx.currentTime;
+  c.cheer = Math.max(0, c.cheer - dt * 0.35);
+  var lvl = AU.crowdLevel * 0.05 + c.cheer * 0.13;
+  c.g.gain.setTargetAtTime(lvl, t, 0.15);
+  c.g2.gain.setTargetAtTime(AU.crowdLevel * 0.06 + c.cheer * 0.05, t, 0.2);
+  c.bp.frequency.setTargetAtTime(800 + c.cheer * 500, t, 0.2);
+};
+/** Engine voice for a vehicle. Returns {update(rpmNorm 0..1, throttle, load 0..1, boost 0..1, extra), stop()}.
+ *  engine = vehicle.engine: {type, count, cyl, turbo, whistle, pitch, rough, blower, volume}. */
+AU.engine = function (engine) {
+  var dummy = { update: function () {}, stop: function () {}, pop: function () {} };
+  if (!AU.ready) return dummy;
+  try {
+    var ctx = AU.ctx, e = engine || {}, type = e.type || 'diesel', count = Math.max(1, Math.min(4, e.count || 1));
+    var out = ctx.createGain(); out.gain.value = 0; out.connect(AU.master);
+    var shaper = ctx.createWaveShaper(), curve = new Float32Array(256);
+    var drive = type === 'gas' || type === 'multi' ? 3.2 : 2.2;
+    for (var i = 0; i < 256; i++) { var x = i / 128 - 1; curve[i] = Math.tanh(x * drive); }
+    shaper.curve = curve;
+    var lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 600; lp.Q.value = 1.2;
+    shaper.connect(lp); lp.connect(out);
+    var oscs = [];
+    var cyl = e.cyl || (type === 'diesel' ? 6 : 8);
+    for (var k = 0; k < count; k++) {
+      var o1 = ctx.createOscillator(); o1.type = 'sawtooth';
+      var o2 = ctx.createOscillator(); o2.type = 'square';
+      var g1 = ctx.createGain(); g1.gain.value = 0.32 / Math.sqrt(count);
+      var g2 = ctx.createGain(); g2.gain.value = (type === 'gas' || type === 'multi' ? 0.22 : 0.12) / Math.sqrt(count);
+      o1.connect(g1); o2.connect(g2); g1.connect(shaper); g2.connect(shaper);
+      o1.start(); o2.start();
+      oscs.push({ o1: o1, o2: o2, detune: 1 + (k - (count - 1) / 2) * 0.013 });
+    }
+    // diesel clatter: band-passed noise gated at firing frequency
+    var clat = null;
+    if (type === 'diesel') {
+      var ns = noiseSrc(), bp = ctx.createBiquadFilter(), cg = ctx.createGain(), lfo = ctx.createOscillator(), lfoG = ctx.createGain();
+      bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = 1.4; cg.gain.value = 0;
+      lfo.type = 'square'; lfoG.gain.value = 0.5; lfo.connect(lfoG); lfoG.connect(cg.gain);
+      ns.connect(bp); bp.connect(cg); cg.connect(out); ns.start(); lfo.start();
+      clat = { lfo: lfo, cg: cg, lfoG: lfoG };
+    }
+    // turbo whistle / blower whine / turbine scream
+    var wh = null;
+    if (e.turbo || type === 'methanol' || type === 'turbine' || e.blower || type === 'diesel') {
+      var wo = ctx.createOscillator(); wo.type = type === 'turbine' ? 'triangle' : 'sine';
+      var wg = ctx.createGain(); wg.gain.value = 0; wo.connect(wg); wg.connect(out); wo.start();
+      var wn = noiseSrc(), wbp = ctx.createBiquadFilter(), wng = ctx.createGain(); wbp.type = 'bandpass'; wbp.frequency.value = 3500; wbp.Q.value = 2; wng.gain.value = 0;
+      wn.connect(wbp); wbp.connect(wng); wng.connect(out); wn.start();
+      wh = { o: wo, g: wg, ng: wng, bp: wbp, base: type === 'turbine' ? 2800 : (e.blower ? 900 : 1600), amt: (e.whistle != null ? e.whistle : 0.7) };
+    }
+    var pitch = e.pitch || 1, vol = (e.volume || 1) * 0.9, rough = e.rough != null ? e.rough : 0.5;
+    var lastRpm = 0;
+    var v = {
+      update: function (rpmN, throttle, load, boost, extra) {
+        var t = ctx.currentTime;
+        rpmN = clamp(rpmN, 0, 1.15);
+        var idleHz = type === 'turbine' ? 60 : (type === 'diesel' ? 26 : 34);
+        var topHz = type === 'turbine' ? 160 : (type === 'diesel' ? 115 : (type === 'gas' || type === 'multi' ? 230 : 190));
+        var f = (idleHz + (topHz - idleHz) * rpmN) * pitch * (cyl / 8);
+        if (type === 'turbine') f *= 0.5;
+        for (var j = 0; j < oscs.length; j++) {
+          var od = oscs[j], jitter = 1 + (Math.random() - 0.5) * 0.02 * rough;
+          od.o1.frequency.setTargetAtTime(f * od.detune * jitter, t, 0.03);
+          od.o2.frequency.setTargetAtTime(f * 0.5 * od.detune, t, 0.03);
+        }
+        lp.frequency.setTargetAtTime(380 + 2600 * clamp(throttle * 0.7 + rpmN * 0.5, 0, 1.3), t, 0.05);
+        var g = vol * (0.18 + 0.5 * throttle + 0.25 * rpmN) * (extra && extra.limiter ? (Math.random() < 0.5 ? 0.6 : 1) : 1);
+        out.gain.setTargetAtTime(g, t, 0.04);
+        if (clat) { clat.lfo.frequency.setTargetAtTime(f * 0.5, t, 0.03); clat.cg.gain.setTargetAtTime(0.12 * (0.5 + throttle) * rough, t, 0.05); clat.lfoG.gain.setTargetAtTime(0.12 * (0.5 + throttle) * rough, t, 0.05); }
+        if (wh) {
+          var b = clamp(boost, 0, 1.4);
+          wh.o.frequency.setTargetAtTime(wh.base + (type === 'turbine' ? 5200 : 4200) * b * (0.6 + 0.4 * rpmN), t, 0.08);
+          wh.g.gain.setTargetAtTime(0.045 * wh.amt * b * b, t, 0.08);
+          wh.ng.gain.setTargetAtTime(0.05 * wh.amt * b, t, 0.1);
+          wh.bp.frequency.setTargetAtTime(2500 + 3000 * b, t, 0.1);
+        }
+        lastRpm = rpmN;
+      },
+      stop: function () {
+        try {
+          out.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
+          setTimeout(function () { try { oscs.forEach(function (o) { o.o1.stop(); o.o2.stop(); }); if (clat) clat.lfo.stop(); if (wh) wh.o.stop(); out.disconnect(); } catch (e) {} }, 400);
+        } catch (e) {}
+      }
+    };
+    AU.voices.push(v);
+    return v;
+  } catch (err) { console.warn('[TP] engine audio failed', err); return dummy; }
+};
+/** One-shot effects: 'hook','shift','bang','horn','chime','click','pop','light','go','whoosh','coin','thud'. */
+AU.sfx = function (name, o) {
+  if (!AU.ready) return;
+  o = o || {};
+  try {
+    var ctx = AU.ctx, t = ctx.currentTime, g = ctx.createGain(); g.connect(AU.master);
+    var vol = o.volume != null ? o.volume : 1;
+    var tone = function (type, f0, f1, dur, v, delay) {
+      var os = ctx.createOscillator(), gg = ctx.createGain(); os.type = type;
+      var st = t + (delay || 0);
+      os.frequency.setValueAtTime(f0, st); if (f1) os.frequency.exponentialRampToValueAtTime(Math.max(1, f1), st + dur);
+      gg.gain.setValueAtTime(0.0001, st); gg.gain.exponentialRampToValueAtTime(v * vol, st + 0.01); gg.gain.exponentialRampToValueAtTime(0.0001, st + dur);
+      os.connect(gg); gg.connect(g); os.start(st); os.stop(st + dur + 0.05);
+    };
+    var noise = function (dur, v, ftype, freq, q, delay) {
+      var s = noiseSrc(), f = ctx.createBiquadFilter(), gg = ctx.createGain(), st = t + (delay || 0);
+      f.type = ftype || 'lowpass'; f.frequency.value = freq || 800; f.Q.value = q || 0.7;
+      gg.gain.setValueAtTime(v * vol, st); gg.gain.exponentialRampToValueAtTime(0.0001, st + dur);
+      s.connect(f); f.connect(gg); gg.connect(g); s.start(st); s.stop(st + dur + 0.05);
+    };
+    switch (name) {
+      case 'hook': tone('square', 900, 700, 0.12, 0.08); tone('triangle', 1800, 1500, 0.2, 0.06, 0.02); noise(0.15, 0.25, 'highpass', 2500, 1); break;
+      case 'shift': noise(0.18, 0.35, 'bandpass', 1800, 0.8); tone('square', 120, 60, 0.12, 0.12); break;
+      case 'bang': noise(0.9, 1.0, 'lowpass', 600, 0.5); tone('sine', 90, 30, 0.6, 0.9); noise(0.4, 0.5, 'highpass', 1500, 0.5, 0.05); break;
+      case 'pop': noise(0.12, 0.6, 'lowpass', 1200, 1); tone('sine', 160, 50, 0.1, 0.3); break;
+      case 'horn': [233, 294, 349].forEach(function (f) { tone('sawtooth', f, f * 0.995, 1.3, 0.09); }); break;
+      case 'chime': tone('sine', 988, 0, 0.5, 0.18); tone('sine', 740, 0, 0.7, 0.18, 0.22); break;
+      case 'click': tone('square', 1400, 900, 0.04, 0.05); break;
+      case 'light': tone('square', 660, 0, 0.14, 0.07); break;
+      case 'go': tone('square', 1320, 0, 0.35, 0.08); break;
+      case 'whoosh': noise(0.6, 0.25, 'bandpass', 900, 0.6); break;
+      case 'coin': tone('square', 988, 0, 0.08, 0.07); tone('square', 1319, 0, 0.25, 0.07, 0.08); break;
+      case 'thud': tone('sine', 70, 40, 0.3, 0.5); noise(0.2, 0.3, 'lowpass', 300); break;
+      default: tone('sine', 600, 300, 0.2, 0.1);
+    }
+    setTimeout(function () { try { g.disconnect(); } catch (e) {} }, 2500);
+  } catch (e) { /* audio is optional */ }
+};
+
+/* ---------------------------------------------------------------------------
+ * 14. INPUT  TP.input — keyboard + multi-touch pointer controls (bound at boot)
+ * ------------------------------------------------------------------------- */
+var IN = TP.input = { throttle: 0, steer: 0, shiftHeld: false, boostHeld: false, _shiftTap: false, _boostTap: false, keys: {},
+  pedal: 0, steerL: false, steerR: false, usingTouch: false, enabled: false };
+IN.consumeShift = function () { var s = IN.shiftHeld || IN._shiftTap; IN._shiftTap = false; return s; };
+IN.consumeBoost = function () { var b = IN.boostHeld || IN._boostTap; IN._boostTap = false; return b; };
+IN.reset = function () { IN.throttle = 0; IN.steer = 0; IN.pedal = 0; IN.steerL = IN.steerR = false; IN.shiftHeld = IN.boostHeld = false; IN._shiftTap = IN._boostTap = false; IN.keys = {}; IN.kbThrottle = 0; };
+IN.kbThrottle = 0;
+function pollInput(dt) {
+  var k = IN.keys;
+  var up = k.KeyW || k.ArrowUp, dn = k.KeyS || k.ArrowDown;
+  if (up) IN.kbThrottle = Math.min(1, IN.kbThrottle + dt * 1.5);
+  else IN.kbThrottle = Math.max(0, IN.kbThrottle - dt * (dn ? 4 : 2.4));
+  IN.throttle = Math.max(IN.kbThrottle, IN.pedal);
+  var l = k.KeyA || k.ArrowLeft || IN.steerL, r = k.KeyD || k.ArrowRight || IN.steerR;
+  IN.steer = (r ? 1 : 0) - (l ? 1 : 0);
+}
+function bindInput() {
+  W.addEventListener('keydown', function (e) {
+    if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    var code = e.code;
+    if (!IN.keys[code]) {
+      if (code === 'Space') { IN._shiftTap = true; IN.shiftHeld = true; }
+      if (code === 'ShiftLeft' || code === 'ShiftRight') { IN._boostTap = true; IN.boostHeld = true; }
+      if (code === 'Escape' || code === 'KeyP') TP.emit('pauseKey');
+      if (code === 'KeyC') TP.emit('cameraKey');
+    }
+    IN.keys[code] = true;
+    if (R3.pullUpdate && /Space|Arrow/.test(code)) e.preventDefault();
+    AU.init();
+  });
+  W.addEventListener('keyup', function (e) {
+    var code = e.code; IN.keys[code] = false;
+    if (code === 'Space') IN.shiftHeld = false;
+    if (code === 'ShiftLeft' || code === 'ShiftRight') IN.boostHeld = false;
+  });
+  W.addEventListener('blur', function () { IN.keys = {}; IN.pedal = 0; IN.steerL = IN.steerR = false; IN.shiftHeld = IN.boostHeld = false; });
+  // first gesture starts audio
+  var unlock = function () { AU.init(); };
+  W.addEventListener('pointerdown', unlock, { passive: true });
+  W.addEventListener('touchstart', function () { if (!IN.usingTouch) { IN.usingTouch = true; document.documentElement.classList.add('touch'); } }, { passive: true });
+  // on-screen controls (multi-touch via pointer capture: each control tracks its own pointers)
+  var pedal = document.getElementById('pedal');
+  if (pedal) {
+    var pedalPtrs = {};
+    var setPedal = function (e) {
+      var r = pedal.getBoundingClientRect();
+      IN.pedal = clamp(1 - (e.clientY - r.top - r.height * 0.06) / (r.height * 0.88), 0, 1);
+    };
+    pedal.addEventListener('pointerdown', function (e) { e.preventDefault(); pedalPtrs[e.pointerId] = true; try { pedal.setPointerCapture(e.pointerId); } catch (x) {} setPedal(e); pedal.classList.add('on'); });
+    pedal.addEventListener('pointermove', function (e) { if (pedalPtrs[e.pointerId]) setPedal(e); });
+    var pedalUp = function (e) { if (!pedalPtrs[e.pointerId]) return; delete pedalPtrs[e.pointerId]; if (!Object.keys(pedalPtrs).length) { IN.pedal = 0; pedal.classList.remove('on'); } };
+    pedal.addEventListener('pointerup', pedalUp); pedal.addEventListener('pointercancel', pedalUp); pedal.addEventListener('lostpointercapture', pedalUp);
+  }
+  var hold = function (id, on, off) {
+    var el = document.getElementById(id); if (!el) return;
+    var ptrs = {};
+    el.addEventListener('pointerdown', function (e) { e.preventDefault(); ptrs[e.pointerId] = 1; try { el.setPointerCapture(e.pointerId); } catch (x) {} el.classList.add('on'); on(); });
+    var up = function (e) { if (!ptrs[e.pointerId]) return; delete ptrs[e.pointerId]; if (!Object.keys(ptrs).length) { el.classList.remove('on'); off(); } };
+    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('lostpointercapture', up);
+    el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  };
+  hold('btnLeft', function () { IN.steerL = true; }, function () { IN.steerL = false; });
+  hold('btnRight', function () { IN.steerR = true; }, function () { IN.steerR = false; });
+  hold('btnShift', function () { IN._shiftTap = true; IN.shiftHeld = true; }, function () { IN.shiftHeld = false; });
+  hold('btnBoost', function () { IN._boostTap = true; IN.boostHeld = true; }, function () { IN.boostHeld = false; });
+  var game = document.getElementById('game');
+  ['touchstart', 'touchmove'].forEach(function (ev) { (document.getElementById('controls') || game).addEventListener(ev, function (e) { if (R3.pullUpdate) e.preventDefault(); }, { passive: false }); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { TP.emit('hidden'); if (AU.ctx && AU.ready) { try { AU.ctx.suspend(); } catch (e) {} } }
+    else if (AU.ctx && AU.ready) { try { AU.ctx.resume(); } catch (e) {} }
+  });
+  IN.enabled = true;
+}
+
+/*__PART_E__*/
 })();

@@ -2917,7 +2917,7 @@
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   renderer.info.autoReset = false;
-  G.exposure = 1.0;
+  G.exposure = 0.8;
   // subtle colour grade applied after ACES (cool shadows, warm highlights, +8% saturation)
   (function () {
     var ch = THREE.ShaderChunk.tonemapping_pars_fragment, re = /(vec3 ACESFilmicToneMapping\( vec3 color \) \{[\s\S]*?)return saturate\( color \);/;
