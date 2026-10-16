@@ -18,7 +18,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:syste
 .touch #map{width:120px;height:120px;top:calc(12px + env(safe-area-inset-top,0px));bottom:auto}
 </style></head><body>
 <div id="hud"></div><div id="msg"></div><canvas id="map" width="180" height="180"></canvas>
-<div id="help">WASD move/drive · Mouse look · E enter/exit car · Space handbrake · Shift sprint · T start taxi job</div>
+<div id="help">WASD move/drive · Mouse look · E enter/exit car · Space handbrake · Shift sprint · T start taxi job · Crimes bring police!</div>
 <div id="touch"><div id="joy"><div id="knob"></div></div>
 <button class="tb" id="bE" style="--r:24px;--b:110px">E</button><button class="tb" id="bB" style="--r:100px;--b:30px">BRAKE</button>
 <button class="tb" id="bT" style="--r:24px;--b:30px">TAXI</button><button class="tb" id="bR" style="--r:100px;--b:110px">RUN</button></div>
@@ -229,7 +229,7 @@ function toggleCar(){
   parked.forEach(function(c){var d=c.mesh.position.distanceTo(P.pos);if(d<bd){bd=d;best=c;}});
   traffic.forEach(function(c){var d=c.mesh.position.distanceTo(P.pos);if(d<bd){bd=d;best=c;}});
   if(!best)return;
-  if(traffic.indexOf(best)>=0){traffic.splice(traffic.indexOf(best),1);best.h=best.mesh.rotation.y;best.v=0;say('Carjacked! (-$50 fine)');P.money-=50;spawnTraffic();}
+  if(traffic.indexOf(best)>=0){traffic.splice(traffic.indexOf(best),1);best.h=best.mesh.rotation.y;best.v=0;say('Carjacked! Police are coming!');addWanted(1);spawnTraffic();}
   parked.splice(parked.indexOf(best),1);P.car=best;avatar.visible=false;
 }
 function collide(pos,r){var k=bkey(pos.x,pos.z).split(','),hit=false;
@@ -244,7 +244,8 @@ function updatePlayer(dt){
     c.h+=st*dt*clamp(c.v/6,-1,1)*(keys.Space?2.6:1.7)/(1+Math.abs(c.v)*.02);
     c.mesh.position.x+=Math.sin(c.h)*c.v*dt;c.mesh.position.z+=Math.cos(c.h)*c.v*dt;
     if(collide(c.mesh.position,2.2))c.v*=-.3;
-    traffic.concat(parked).forEach(function(o){var dx=c.mesh.position.x-o.mesh.position.x,dz=c.mesh.position.z-o.mesh.position.z,d=Math.hypot(dx,dz);if(d<4&&d>0){c.mesh.position.x+=dx/d*(4-d);c.mesh.position.z+=dz/d*(4-d);if(Math.abs(c.v)>8)say('CRASH!');c.v*=.5;}});
+    traffic.concat(parked,police).forEach(function(o){var dx=c.mesh.position.x-o.mesh.position.x,dz=c.mesh.position.z-o.mesh.position.z,d=Math.hypot(dx,dz);if(d<4&&d>0){c.mesh.position.x+=dx/d*(4-d);c.mesh.position.z+=dz/d*(4-d);if(Math.abs(c.v)>8){say('CRASH!');if(o.cop||traffic.indexOf(o)>=0)addWanted(o.cop?1:.34);}c.v*=.5;}});
+    peds.forEach(function(p){if(Math.abs(c.v)>5&&p.m.position.distanceTo(c.mesh.position)<2.5){say('You hit a pedestrian!');addWanted(1);p.b=blocks[(rnd()*blocks.length)|0];p.t=rnd()*4;}});
     c.mesh.rotation.y=c.h;P.pos.copy(c.mesh.position);
   } else {var mv=new THREE.Vector3((keys.KeyA?-1:0)+(keys.KeyD?1:0),0,(keys.KeyW?-1:0)+(keys.KeyS?1:0));
     if(mv.lengthSq()){mv.normalize().applyAxisAngle(new THREE.Vector3(0,1,0),P.yaw).multiplyScalar((keys.ShiftLeft?9:4)*dt);P.pos.add(mv);avatar.rotation.y=Math.atan2(-mv.x,-mv.z)+Math.PI;avatar.ph=(avatar.ph||0)+dt*(keys.ShiftLeft?14:9);}
@@ -291,9 +292,50 @@ var mapC=document.getElementById('map'),mg=mapC.getContext('2d');
 function drawMap(){var S=1.1;mg.save();mg.fillStyle='#3c5a2e';mg.fillRect(0,0,180,180);mg.translate(90,90);mg.rotate(P.car?P.car.h+Math.PI:P.yaw);mg.scale(S,S);mg.translate(-P.pos.x,-P.pos.z);
   mg.fillStyle='#555';mg.fillRect(-HALF-RW/2,-HALF-RW/2,N*CELL+RW,N*CELL+RW);mg.fillStyle='#bbb';blocks.forEach(function(b){mg.fillRect(b[0],b[1],BLOCK,BLOCK);});
   mg.fillStyle='#e33';traffic.forEach(function(c){mg.fillRect(c.mesh.position.x-1.5,c.mesh.position.z-1.5,3,3);});
+  mg.fillStyle=Math.sin(clock*14)>0?'#f22':'#26f';police.forEach(function(c){mg.beginPath();mg.arc(c.mesh.position.x,c.mesh.position.z,4,0,7);mg.fill();});
   if(job){mg.fillStyle=job.stage?'#3f6':'#fd3';mg.beginPath();mg.arc(job.at.x,job.at.z,6,0,7);mg.fill();}
   mg.restore();mg.fillStyle='#09f';mg.beginPath();mg.moveTo(90,82);mg.lineTo(96,97);mg.lineTo(84,97);mg.fill();
   if(job){var dx=job.at.x-P.pos.x,dz=job.at.z-P.pos.z;mg.fillStyle='#fff';mg.font='12px system-ui';mg.fillText(Math.round(Math.hypot(dx,dz))+' m',70,170);}}
+
+// ---------- police ----------
+var police=[],wanted=0,calmT=0,bustT=0,copSpawnT=0;
+var copBody=new THREE.MeshStandardMaterial({color:0x111a2e,metalness:.5,roughness:.4});
+var redL=new THREE.MeshBasicMaterial({color:0xff0000}),blueL=new THREE.MeshBasicMaterial({color:0x0044ff});
+function addWanted(n){wanted=Math.min(5,wanted+n);calmT=0;}
+function nearestRoad(v){return clamp(Math.round((v+HALF)/CELL),0,N);}
+function spawnCop(){var a=rnd()*Math.PI*2,x=P.pos.x+Math.cos(a)*110,z=P.pos.z+Math.sin(a)*110;
+  if(rnd()<.5)x=roadPos(nearestRoad(x));else z=roadPos(nearestRoad(z));
+  x=clamp(x,-HALF,HALF);z=clamp(z,-HALF,HALF);
+  var m=makeCar(copBody),r=new THREE.Mesh(bgeo,redL),b=new THREE.Mesh(bgeo,blueL);
+  r.scale.set(.6,.2,.3);b.scale.set(.6,.2,.3);r.position.set(-.4,1.75,-.2);b.position.set(.4,1.75,-.2);m.add(r,b);
+  var door=new THREE.Mesh(bgeo,new THREE.MeshStandardMaterial({color:0xffffff}));door.scale.set(1.92,.3,1.6);door.position.set(0,.7,0);m.add(door);
+  m.position.set(x,0,z);var c={mesh:m,v:0,h:Math.atan2(P.pos.x-x,P.pos.z-z),cop:true,r:r,b:b,stuck:0,rev:0};police.push(c);}
+function updatePolice(dt){
+  if(wanted>0){var near=police.some(function(c){return c.mesh.position.distanceTo(P.pos)<70;});
+    calmT=near?0:calmT+dt;if(calmT>12){wanted=Math.max(0,Math.floor(wanted)-1);calmT=0;say(wanted?'Losing them...':'You lost the cops!');}}
+  var want=Math.min(5,Math.ceil(wanted)+(wanted>=3?1:0));copSpawnT-=dt;
+  if(police.length<want&&copSpawnT<=0){spawnCop();copSpawnT=3;}
+  if(wanted<=0)for(var i=police.length-1;i>=0;i--)if(police[i].mesh.position.distanceTo(P.pos)>90){scene.remove(police[i].mesh);police.splice(i,1);}
+  var flash=Math.sin(clock*14)>0;redL.color.setHex(flash?0xff0000:0x330000);blueL.color.setHex(flash?0x001133:0x0050ff);
+  var close=false;
+  police.forEach(function(c){var p=c.mesh.position,tx=P.pos.x,tz=P.pos.z;
+    if(wanted>0&&p.distanceTo(P.pos)>25){ // follow road grid toward player
+      var rx=roadPos(nearestRoad(p.x)),rz=roadPos(nearestRoad(p.z)),onX=Math.abs(p.z-rz)<RW/2,onZ=Math.abs(p.x-rx)<RW/2;
+      var px=roadPos(nearestRoad(tx)),pz=roadPos(nearestRoad(tz));
+      if(onX&&(!onZ||Math.abs(tx-p.x)>Math.abs(tz-p.z))){tx=Math.abs(px-p.x)<4?px:px;tz=rz;if(Math.abs(px-p.x)<6){tx=px;tz=tz+(P.pos.z>p.z?20:-20);}}
+      else if(onZ){tz=pz;tx=rx;if(Math.abs(pz-p.z)<6){tz=pz;tx=tx+(P.pos.x>p.x?20:-20);}}}
+    var maxV=wanted>0?(P.car?Math.max(30,Math.abs(P.car.v)+3):12):0;
+    var want=Math.atan2(tx-p.x,tz-p.z),d=want-c.h;d=Math.atan2(Math.sin(d),Math.cos(d));
+    if(c.rev>0){c.rev-=dt;c.v=-6;c.h-=d*dt;}else{c.h+=clamp(d,-1,1)*dt*2.4;c.v+=(Math.abs(d)>1.2?maxV*.4:maxV)>c.v?14*dt:-20*dt;}
+    p.x+=Math.sin(c.h)*c.v*dt;p.z+=Math.cos(c.h)*c.v*dt;
+    if(collide(p,2.2)){c.stuck+=dt;if(c.stuck>.6){c.rev=.8;c.stuck=0;}}else c.stuck=Math.max(0,c.stuck-dt);
+    police.forEach(function(o){if(o===c)return;var dx=p.x-o.mesh.position.x,dz=p.z-o.mesh.position.z,dd=Math.hypot(dx,dz);if(dd<4&&dd>0){p.x+=dx/dd*(4-dd)*.5;p.z+=dz/dd*(4-dd)*.5;}});
+    c.mesh.rotation.y=c.h;
+    if(wanted>0&&p.distanceTo(P.pos)<6&&(!P.car||Math.abs(P.car.v)<4))close=true;});
+  bustT=close?bustT+dt:Math.max(0,bustT-dt*2);
+  if(bustT>3){var fine=Math.round(Math.max(0,P.money)*.3)+100;P.money-=fine;say('BUSTED! Fined $'+fine);wanted=0;bustT=0;
+    if(P.car)toggleCar();P.pos.set(roadPos(4)+RW/2+2,.25,roadPos(4)+RW/2+10);police.forEach(function(c){scene.remove(c.mesh);});police.length=0;}
+}
 
 // ---------- day/night ----------
 var clock=0, tod=9, sky=new THREE.Color(), dayC=new THREE.Color(0x9fc4e8), duskC=new THREE.Color(0xf08a5a), nightC=new THREE.Color(0x0a1022);
@@ -307,11 +349,11 @@ function updateSky(dt){tod=(tod+dt*24/600)%24; // 10 min per day
 // ---------- loop ----------
 var hud=document.getElementById('hud'),last=performance.now();
 function loop(now){var dt=Math.min(.05,(now-last)/1000);last=now;clock+=dt;
-  updateSky(dt);updateTraffic(dt);updatePeds(dt);updatePlayer(dt);updateJob(dt);
+  updateSky(dt);updateTraffic(dt);updatePeds(dt);updatePlayer(dt);updateJob(dt);updatePolice(dt);
   for(var k in lights){var L=lights[k];L.mx.color.setHex(LC[green('x',L.i,L.j)]);L.mz.color.setHex(LC[green('z',L.i,L.j)]);}
   if(msgT>0){msgT-=dt;if(msgT<=0)msgEl.style.opacity=0;}
   var hh=Math.floor(tod),mm=Math.floor((tod-hh)*60);
-  hud.innerHTML='<b>$'+P.money+'</b><br>Time '+(hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm+'<br>'+(P.car?'Speed '+Math.round(Math.abs(P.car.v)*3.6)+' km/h':'On foot')+(job?'<br>Taxi: '+(job.stage?'drop off':'pick up'):'');
+  hud.innerHTML='<b>$'+P.money+'</b><br>Time '+(hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm+'<br>'+(P.car?'Speed '+Math.round(Math.abs(P.car.v)*3.6)+' km/h':'On foot')+(wanted>=1?'<br><span style="color:#ff5050;font-size:20px">'+'★'.repeat(Math.floor(wanted))+'</span>'+(bustT>0?' <b>BUSTED IN '+Math.ceil(3-bustT)+'</b>':''):'')+(job?'<br>Taxi: '+(job.stage?'drop off':'pick up'):'');
   drawMap();renderer.render(scene,camera);requestAnimationFrame(loop);}
 requestAnimationFrame(loop);
 })();
