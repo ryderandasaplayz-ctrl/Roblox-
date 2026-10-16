@@ -384,17 +384,22 @@ function updatePolice(dt){
       var px=roadPos(nearestRoad(tx)),pz=roadPos(nearestRoad(tz));
       if(onX&&(!onZ||Math.abs(tx-p.x)>Math.abs(tz-p.z))){tx=Math.abs(px-p.x)<4?px:px;tz=rz;if(Math.abs(px-p.x)<6){tx=px;tz=tz+(P.pos.z>p.z?20:-20);}}
       else if(onZ){tz=pz;tx=rx;if(Math.abs(pz-p.z)<6){tz=pz;tx=tx+(P.pos.x>p.x?20:-20);}}}
-    var maxV=wanted>0?(P.car?Math.max(30,Math.abs(P.car.v)+3):12):0;
+    var dP=p.distanceTo(P.pos),maxV=wanted>0?(P.car?Math.max(30,Math.abs(P.car.v)+3):12):12;
+    if(wanted>0&&wanted<3&&dP<9)maxV=0;if(wanted<=0){tx=p.x*2-P.pos.x;tz=p.z*2-P.pos.z;}
     var want=Math.atan2(tx-p.x,tz-p.z),d=want-c.h;d=Math.atan2(Math.sin(d),Math.cos(d));
     if(c.rev>0){c.rev-=dt;c.v=-6;c.h-=d*dt;}else{c.h+=clamp(d,-1,1)*dt*2.4;c.v+=(Math.abs(d)>1.2?maxV*.4:maxV)>c.v?14*dt:-20*dt;}
     p.x+=Math.sin(c.h)*c.v*dt;p.z+=Math.cos(c.h)*c.v*dt;
     if(collide(p,2.2)){c.stuck+=dt;if(c.stuck>.6){c.rev=.8;c.stuck=0;}}else c.stuck=Math.max(0,c.stuck-dt);
     police.forEach(function(o){if(o===c)return;var dx=p.x-o.mesh.position.x,dz=p.z-o.mesh.position.z,dd=Math.hypot(dx,dz);if(dd<4&&dd>0){p.x+=dx/dd*(4-dd)*.5;p.z+=dz/dd*(4-dd)*.5;}});
     c.mesh.rotation.y=c.h;
-    if(wanted>0&&p.distanceTo(P.pos)<6&&(!P.car||Math.abs(P.car.v)<4))close=true;});
+    if(wanted>0&&p.distanceTo(P.pos)<(wanted<3?10:6)&&(!P.car||Math.abs(P.car.v)<(wanted<3?2:4)))close=true;});
+  var serious=wanted>=3,need=serious?5:2.5;
   bustT=close?bustT+dt:Math.max(0,bustT-dt*2);
-  if(bustT>3){var fine=Math.round(Math.max(0,P.money)*.3)+100;P.money-=fine;say('BUSTED! Fined $'+fine);wanted=0;bustT=0;
-    if(P.car)toggleCar();P.pos.set(roadPos(4)+RW/2+2,.25,roadPos(4)+RW/2+10);police.forEach(function(c){scene.remove(c.mesh);});police.length=0;}
+  if(wanted>0&&!serious&&!close&&police.some(function(c){return !c.dead&&c.mesh.position.distanceTo(P.pos)<30;})&&msgT<=0)say(P.car?'🚨 Pull over! Stop the car':'🚨 Police! Stop right there');
+  if(bustT>need){bustT=0;
+    if(!serious){var tk=50+Math.floor(wanted)*75;P.money-=tk;say('Ticket: $'+tk+'. Drive safe!');wanted=0;}
+    else{var fine=Math.round(Math.max(0,P.money)*.3)+100;P.money-=fine;say('BUSTED! Fined $'+fine);wanted=0;
+      if(P.car)toggleCar();P.pos.set(roadPos(4)+RW/2+2,.25,roadPos(4)+RW/2+10);police.forEach(function(c){scene.remove(c.mesh);});police.length=0;}}
 }
 
 // ---------- guns ----------
@@ -470,7 +475,7 @@ function loop(now){var dt=Math.min(.05,(now-last)/1000);last=now;clock+=dt;
   for(var k in lights){var L=lights[k];L.mx.color.setHex(LC[green('x',L.i,L.j)]);L.mz.color.setHex(LC[green('z',L.i,L.j)]);}
   if(msgT>0){msgT-=dt;if(msgT<=0)msgEl.style.opacity=0;}
   var hh=Math.floor(tod),mm=Math.floor((tod-hh)*60);
-  hud.innerHTML='<b>$'+P.money+'</b> &nbsp;❤ '+Math.ceil(health)+'<br>Time '+(hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm+'<br>'+(P.car?'Speed '+Math.round(Math.abs(P.car.v)*3.6)+' km/h':'On foot')+(wanted>=1?'<br><span style="color:#ff5050;font-size:20px">'+'★'.repeat(Math.floor(wanted))+'</span>'+(bustT>0?' <b>BUSTED IN '+Math.ceil(3-bustT)+'</b>':''):'')+(job?'<br>Taxi: '+(job.stage?'drop off':'pick up'):'');
+  hud.innerHTML='<b>$'+P.money+'</b> &nbsp;❤ '+Math.ceil(health)+'<br>Time '+(hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm+'<br>'+(P.car?'Speed '+Math.round(Math.abs(P.car.v)*3.6)+' km/h':'On foot')+(wanted>=1?'<br><span style="color:#ff5050;font-size:20px">'+'★'.repeat(Math.floor(wanted))+'</span>'+(bustT>0?' <b>'+(wanted>=3?'BUSTED IN '+Math.ceil(5-bustT):'TICKET IN '+Math.ceil(2.5-bustT))+'</b>':''):'')+(job?'<br>Taxi: '+(job.stage?'drop off':'pick up'):'');
   drawMap();renderer.render(scene,camera);requestAnimationFrame(loop);}
 requestAnimationFrame(loop);
 })();
