@@ -10,10 +10,19 @@ html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:syste
 #map{position:fixed;right:12px;bottom:12px;border:2px solid #fff;border-radius:50%;background:#222}
 #help{position:fixed;left:12px;bottom:12px;background:rgba(0,0,0,.55);padding:8px 12px;border-radius:10px;font-size:12px;pointer-events:none}
 #start{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.6);font-size:22px;cursor:pointer;text-align:center}
+#touch{display:none}
+.touch #touch{display:block}.touch #help{display:none}
+#joy{position:fixed;left:calc(24px + env(safe-area-inset-left,0px));bottom:calc(24px + env(safe-area-inset-bottom,0px));width:130px;height:130px;border-radius:50%;background:rgba(255,255,255,.15);border:2px solid rgba(255,255,255,.4);touch-action:none}
+#knob{position:absolute;left:40px;top:40px;width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.6)}
+.tb{position:fixed;width:64px;height:64px;border-radius:50%;background:rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.5);color:#fff;font-weight:700;font-size:13px;touch-action:none;right:calc(var(--r) + env(safe-area-inset-right,0px));bottom:calc(var(--b) + env(safe-area-inset-bottom,0px))}
+.touch #map{width:120px;height:120px;top:calc(12px + env(safe-area-inset-top,0px));bottom:auto}
 </style></head><body>
 <div id="hud"></div><div id="msg"></div><canvas id="map" width="180" height="180"></canvas>
 <div id="help">WASD move/drive · Mouse look · E enter/exit car · Space handbrake · Shift sprint · T start taxi job</div>
-<div id="start"><div><div style="font-size:48px;font-weight:800">METRO CITY</div>Click to play</div></div>
+<div id="touch"><div id="joy"><div id="knob"></div></div>
+<button class="tb" id="bE" style="--r:24px;--b:110px">E</button><button class="tb" id="bB" style="--r:100px;--b:30px">BRAKE</button>
+<button class="tb" id="bT" style="--r:24px;--b:30px">TAXI</button><button class="tb" id="bR" style="--r:100px;--b:110px">RUN</button></div>
+<div id="start"><div><div style="font-size:48px;font-weight:800">METRO CITY</div>Click or tap to play</div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (function(){
@@ -210,8 +219,8 @@ var parked=[myCar];
 var keys={};addEventListener('keydown',function(e){keys[e.code]=true;if(e.code==='KeyE')toggleCar();if(e.code==='KeyT')startJob();});
 addEventListener('keyup',function(e){keys[e.code]=false;});
 var startEl=document.getElementById('start');
-startEl.onclick=function(){startEl.style.display='none';renderer.domElement.requestPointerLock();};
-renderer.domElement.onclick=function(){renderer.domElement.requestPointerLock();};
+startEl.onclick=function(){startEl.style.display='none';try{renderer.domElement.requestPointerLock();}catch(e){}};
+renderer.domElement.onclick=function(){try{renderer.domElement.requestPointerLock();}catch(e){}};
 addEventListener('mousemove',function(e){if(document.pointerLockElement){P.yaw-=e.movementX*.0025;P.pitch=clamp(P.pitch+e.movementY*.002,-.2,1.2);}});
 var msgEl=document.getElementById('msg'),msgT=0;function say(t){msgEl.textContent=t;msgEl.style.opacity=1;msgT=3;}
 function toggleCar(){
@@ -247,6 +256,24 @@ function updatePlayer(dt){
   var want=new THREE.Vector3(P.pos.x+Math.sin(yaw)*dist*Math.cos(P.pitch),P.pos.y+hgt+Math.sin(P.pitch)*dist,P.pos.z+Math.cos(yaw)*dist*Math.cos(P.pitch));
   camera.position.lerp(want,P.car?.12:.3);camera.lookAt(P.pos.x,P.pos.y+hgt,P.pos.z);
   if(P.car&&!document.pointerLockElement)P.yaw*=.95;
+}
+
+// ---------- touch controls ----------
+if('ontouchstart' in window||navigator.maxTouchPoints>0){document.body.classList.add('touch');
+  var joy=document.getElementById('joy'),knob=document.getElementById('knob'),jid=null,lid=null,lx=0,ly=0;
+  function setJoy(t){var r=joy.getBoundingClientRect(),dx=t.clientX-r.left-65,dy=t.clientY-r.top-65,d=Math.hypot(dx,dy);if(d>55){dx*=55/d;dy*=55/d;}
+    knob.style.transform='translate('+dx+'px,'+dy+'px)';keys.KeyW=dy<-15;keys.KeyS=dy>15;keys.KeyA=dx<-15;keys.KeyD=dx>15;}
+  joy.addEventListener('touchstart',function(e){e.preventDefault();var t=e.changedTouches[0];jid=t.identifier;setJoy(t);},{passive:false});
+  addEventListener('touchmove',function(e){for(var i=0;i<e.changedTouches.length;i++){var t=e.changedTouches[i];
+    if(t.identifier===jid)setJoy(t);else if(t.identifier===lid){P.yaw-=(t.clientX-lx)*.006;P.pitch=clamp(P.pitch+(t.clientY-ly)*.004,-.2,1.2);lx=t.clientX;ly=t.clientY;}}e.preventDefault();},{passive:false});
+  function end(e){for(var i=0;i<e.changedTouches.length;i++){var t=e.changedTouches[i];
+    if(t.identifier===jid){jid=null;knob.style.transform='';keys.KeyW=keys.KeyS=keys.KeyA=keys.KeyD=false;}if(t.identifier===lid)lid=null;}}
+  addEventListener('touchend',end);addEventListener('touchcancel',end);
+  renderer.domElement.addEventListener('touchstart',function(e){var t=e.changedTouches[0];if(lid===null){lid=t.identifier;lx=t.clientX;ly=t.clientY;}},{passive:true});
+  function hold(id,k){var b=document.getElementById(id);b.addEventListener('touchstart',function(e){e.preventDefault();keys[k]=true;},{passive:false});b.addEventListener('touchend',function(){keys[k]=false;});}
+  hold('bB','Space');hold('bR','ShiftLeft');
+  document.getElementById('bE').addEventListener('touchstart',function(e){e.preventDefault();toggleCar();},{passive:false});
+  document.getElementById('bT').addEventListener('touchstart',function(e){e.preventDefault();startJob();},{passive:false});
 }
 
 // ---------- taxi jobs ----------
