@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+<defs>
+<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#14052b"/><stop offset=".6" stop-color="#4a1470"/><stop offset="1" stop-color="#ff6a00"/></linearGradient>
+<radialGradient id="moon"><stop offset="0" stop-color="#fffbe0"/><stop offset=".7" stop-color="#ffe27a"/><stop offset="1" stop-color="#ffb627"/></radialGradient>
+<radialGradient id="glow"><stop offset="0" stop-color="#ffd25a" stop-opacity=".6"/><stop offset="1" stop-color="#ffd25a" stop-opacity="0"/></radialGradient>
+<linearGradient id="txt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe14d"/><stop offset="1" stop-color="#ff5a00"/></linearGradient>
+<g id="bat"><path d="M0 0 q-20-25-60-20 q15 10 10 25 q-15-5-25 5 q25 0 40 15 q15-25 35-25 q20 0 35 25 q15-15 40-15 q-10-10-25-5 q-5-15 10-25 q-40-5-60 20 z" fill="#0b0215"/></g>
+<g id="pumpkin"><ellipse cx="0" cy="0" rx="70" ry="55" fill="#ff7a00"/><ellipse cx="-30" cy="0" rx="30" ry="53" fill="#ff8f1f"/><ellipse cx="30" cy="0" rx="30" ry="53" fill="#ff8f1f"/><ellipse cx="0" cy="0" rx="25" ry="55" fill="#ff7a00"/><rect x="-7" y="-75" width="14" height="25" rx="4" fill="#3c7a1e"/><path d="M-40-15 l15-20 l15 20z M10-15 l15-20 l15 20z" fill="#ffe14d"/><path d="M-45 15 q45 35 90 0 l-15 5 l-8-10 l-10 12 l-12-12 l-12 12 l-10-12 l-8 10z" fill="#ffe14d"/></g>
+</defs>
+<rect width="1920" height="1080" fill="url(#sky)"/>
+<g fill="#fff" opacity=".8"><circle cx="120" cy="90" r="3"/><circle cx="400" cy="200" r="2"/><circle cx="700" cy="60" r="3"/><circle cx="980" cy="160" r="2"/><circle cx="1250" cy="80" r="3"/><circle cx="1800" cy="420" r="2"/><circle cx="300" cy="420" r="2"/><circle cx="1100" cy="330" r="2"/></g>
+<circle cx="1560" cy="260" r="330" fill="url(#glow)"/>
+<circle cx="1560" cy="260" r="190" fill="url(#moon)"/>
+<circle cx="1500" cy="220" r="28" fill="#f2c94c" opacity=".5"/><circle cx="1620" cy="320" r="40" fill="#f2c94c" opacity=".4"/>
+<!-- haunted floating island -->
+<path d="M1180 700 h560 l-90 150 l-120 60 l-130-20 l-130-70z" fill="#2a0e3d"/>
+<rect x="1180" y="680" width="560" height="30" fill="#3a1652"/>
+<path d="M1330 680 v-220 l70-90 l70 90 v220z M1470 680 v-160 l60-70 l60 70 v160z" fill="#0b0215"/>
+<rect x="1385" y="520" width="30" height="40" fill="#ffd25a"/><rect x="1515" y="560" width="26" height="34" fill="#ffd25a"/>
+<!-- obby platforms -->
+<g stroke="#0b0215" stroke-width="6">
+<path d="M80 900 h260 v40 h-260z" fill="#ff7a00"/><path d="M400 790 h200 v38 h-200z" fill="#9b30ff"/>
+<path d="M660 690 h180 v36 h-180z" fill="#39ff6a"/><path d="M900 600 h170 v34 h-170z" fill="#ff7a00"/>
+<path d="M1110 520 h150 v32 h-150z" fill="#9b30ff"/></g>
+<rect x="430" y="770" width="140" height="10" fill="#39ff6a" opacity=".9"/>
+<!-- lava -->
+<path d="M0 1000 q120-40 240 0 t240 0 t240 0 t240 0 t240 0 t240 0 t240 0 t240 0 v80 h-1920z" fill="#ff3d00"/>
+<path d="M0 1030 q120-30 240 0 t240 0 t240 0 t240 0 t240 0 t240 0 t240 0 t240 0 v50 h-1920z" fill="#ffb300"/>
+<!-- blocky player -->
+<g transform="translate(720 540) scale(.9)" stroke="#0b0215" stroke-width="5">
+<rect x="0" y="0" width="70" height="70" fill="#ffcc99"/><rect x="-8" y="-12" width="86" height="22" fill="#111"/><path d="M-20-12 l55-60 l55 60z" fill="#5a1a8a"/>
+<rect x="-5" y="70" width="80" height="80" fill="#9b30ff"/><rect x="-35" y="65" width="30" height="75" fill="#9b30ff" transform="rotate(-30 -20 70)"/><rect x="75" y="65" width="30" height="75" fill="#9b30ff" transform="rotate(30 90 70)"/>
+<rect x="0" y="150" width="35" height="18" fill="#2b2b2b"/><rect x="40" y="150" width="35" height="18" fill="#2b2b2b"/>
+<circle cx="22" cy="35" r="6" fill="#111" stroke="none"/><circle cx="50" cy="35" r="6" fill="#111" stroke="none"/></g>
+<use href="#pumpkin" transform="translate(200 850)"/><use href="#pumpkin" transform="translate(985 560) scale(.6)"/><use href="#pumpkin" transform="translate(1250 650) scale(.7)"/>
+<use href="#bat" transform="translate(1380 140) scale(1.3)"/><use href="#bat" transform="translate(1720 180)"/><use href="#bat" transform="translate(1180 330) scale(.8)"/><use href="#bat" transform="translate(900 120) scale(.7)"/>
+<!-- text -->
+<g font-family="DejaVu Sans, Arial Black, sans-serif" font-weight="900" text-anchor="middle">
+<text x="560" y="190" font-size="170" fill="url(#txt)" stroke="#0b0215" stroke-width="14" paint-order="stroke">SKY RUSH</text>
+<text x="560" y="300" font-size="110" fill="#fff" stroke="#0b0215" stroke-width="12" paint-order="stroke">HALLOWEEN</text>
+<g transform="rotate(-3 560 390)"><rect x="130" y="335" width="860" height="95" rx="20" fill="#39ff6a" stroke="#0b0215" stroke-width="8"/>
+<text x="560" y="403" font-size="60" fill="#0b0215">NEW MAP EXPANSION!</text></g>
+<text x="1560" y="1000" font-size="70" fill="#ffe14d" stroke="#0b0215" stroke-width="10" paint-order="stroke">FRIDAY 10/23</text>
+</g>
+</svg>
