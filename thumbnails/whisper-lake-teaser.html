@@ -48,9 +48,7 @@ t.lineWidth=7;t.lineCap='round';t.beginPath();
 for(const d of[0,14]){const bx=128+d,by=-176;t.moveTo(bx,by);t.bezierCurveTo(bx-10,by-60,bx-60,by-90,bx-95,by-120);
  t.moveTo(bx-6,by-30);t.lineTo(bx+22,by-55);t.moveTo(bx-25,by-70);t.lineTo(bx+5,by-105);t.moveTo(bx-55,by-95);t.lineTo(bx-40,by-140);t.moveTo(bx-80,by-112);t.lineTo(bx-75,by-150)}
 t.stroke();t.restore()}
-s.save();s.shadowColor='rgba(140,255,230,.9)';s.shadowBlur=40;s.fillStyle='rgba(190,255,240,.55)';s.strokeStyle='rgba(190,255,240,.6)';elk(s,1560,640,.75);s.restore();
-s.fillStyle='rgba(230,255,250,.35)';s.strokeStyle='rgba(230,255,250,.35)';elk(s,1560,640,.75);
-s.fillStyle='#ff3b3b';s.beginPath();s.arc(1560+150*.75,640-160*.75,3,0,7);s.fill();
+s.fillStyle='#07060c';s.strokeStyle='#07060c';elk(s,1560,640,.75);s.save();s.globalCompositeOperation='source-atop';s.restore();
 x.drawImage(S,0,0);
 // ---------- lake reflection ----------
 g=x.createLinearGradient(0,HZ,0,H);g.addColorStop(0,'#1a1828');g.addColorStop(1,'#030308');x.fillStyle=g;x.fillRect(0,HZ,W,H-HZ);
@@ -77,7 +75,7 @@ function jack(px,py,r){let g2=x.createRadialGradient(px,py,0,px,py,r*5);g2.addCo
  x.fillStyle='#ffd27a';x.shadowColor='#ffae3a';x.shadowBlur=12;x.beginPath();x.moveTo(px-r*.55,py-r*.1);x.lineTo(px-r*.3,py-r*.45);x.lineTo(px-r*.1,py-r*.1);x.moveTo(px+r*.1,py-r*.1);x.lineTo(px+r*.3,py-r*.45);x.lineTo(px+r*.55,py-r*.1);x.fill();
  x.beginPath();x.moveTo(px-r*.65,py+r*.15);for(let k=0;k<=6;k++)x.lineTo(px-r*.65+k*r*.22,py+r*.15+(k%2?r*.2:0));x.quadraticCurveTo(px,py+r*.8,px-r*.65,py+r*.15);x.fill();x.shadowBlur=0;
  x.fillStyle='#1e2a10';x.fillRect(px-r*.1,py-r*1.1,r*.2,r*.3)}
-jack(250,960,34);jack(330,985,24);jack(870,890,20);
+
 // hunter silhouette (from behind) with lantern
 x.save();x.translate(470,905);x.fillStyle='#010102';
 x.beginPath();x.ellipse(0,-200,22,26,0,0,7);x.fill();
