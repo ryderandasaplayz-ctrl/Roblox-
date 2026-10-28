@@ -42,6 +42,7 @@ th{color:var(--dim);font-weight:500;font-size:12px;letter-spacing:.06em;text-tra
 #bug .tm .rk{font-size:11px;opacity:.8}
 #bug .tm .ab{font-size:19px;font-weight:700;letter-spacing:.03em}
 #bug .tm .rec{font-size:10px;opacity:.75}
+@media (max-width:440px){#bug .tm .rec,#bug .tm .rk{display:none}#bug .net{padding:0 5px;font-size:11px}#bug .tm{padding:0 4px}#bug .tm .sc{font-size:21px;padding:0 2px}#bug .clk{min-width:56px;padding:0 4px}#bug .dd{min-width:62px;font-size:12px;padding:0 4px}}
 #bug .tm .sc{margin-left:auto;font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;padding:0 6px}
 #bug .tm .to{position:absolute;bottom:3px;left:8px;display:flex;gap:3px}
 #bug .tm .to i{width:10px;height:3px;background:#fff}
@@ -194,7 +195,7 @@ function hub(){
   if(tab==='home'){
     body=`<div class="card"><div class="row"><span><span class="sw" style="background:${me.c1}"></span><b>${rk?'#'+rk+' ':''}${esc(me.school)} ${esc(me.mascot)}</b></span><span>${me.w}-${me.l}</span></div>
     <div class="row"><span>Season ${S.season} · Week ${Math.min(wk+1,12)}</span><span>OVR <b>${teamOvr()}</b></span></div>
-    <div class="row"><span>Coaching credits</span><b>${S.credits}</b></div><div class="row"><span>Prestige</span><b>${S.prestige}</b></div></div>`;
+    <div class="row"><span>Coaching credits</span><b>${S.credits}</b></div><div class="row"><span>Prestige</span><b>${S.prestige}</b></div><div class="row"><span>Golden Helmet race (QB ${esc(P('QB').name)})</span><b>${S.hs?S.hs.td+' TD · '+S.hs.yd+' yds':'—'}</b></div></div>`;
     if(o)body+=`<div class="card"><h2>NEXT: ${g.home?'vs':'@'} ${rankOf(o)?'#'+rankOf(o)+' ':''}${esc(o.school.toUpperCase())}</h2><div class="row"><span>${esc(o.mascot)} · ${o.conf}</span><span>${o.w}-${o.l} · OVR ${o.ovr}</span></div>
       <div class="row"><span>Broadcast</span><span>${NETS.map(n=>`<button data-a="net" data-v="${n.k}" class="${S.net===n.k?'':'alt'}" style="font-size:9px;padding:8px 6px">${n.n}</button>`).join(' ')}</span></div>
       <button data-a="play">KICKOFF ▶</button></div>`;
@@ -236,7 +237,7 @@ function fmtClock(s){s=Math.max(0,Math.ceil(s));return Math.floor(s/60)+':'+Stri
 function ordinal(n){return['1st','2nd','3rd','4th'][n-1]||n+'th'}
 function newGame(oppId,home,label){
   G={opp:TEAMS[oppId],home,label:label||'',q:1,clock:QLEN,my:0,th:0,poss:'me',los:25,down:1,togo:10,to:[3,3],flag:false,play:null,
-     stats:{pass:0,rush:0,td:0,int:0},drives:0,ot:false,ended:false};
+     stats:{pass:0,rush:0,td:0,int:0,pyd:0},wx:pick(['CLEAR','CLEAR','CLEAR','RAIN','SNOW','WIND']),drives:0,ot:false,ended:false};
 }
 function scoreLine(){return `${ME().ab} ${G.my}, ${G.opp.ab} ${G.th}`}
 
@@ -313,11 +314,12 @@ function pregameLines(){const me=ME(),o=G.opp,rm=rankOf(me),ro=rankOf(o),qb=P('Q
   return[[0,`Good evening and welcome to ${G.home?me.school:o.school}! ${G.label?G.label+'. ':''}${rm?'Number '+rm+' ':''}${me.school} takes on ${ro?'number '+ro+' ':''}${o.school}.`],
     [1,`Chip, all eyes on quarterback ${qb.name}. ${qb.stars>=4?"He's got a cannon and he knows it.":"He's still growing into this offense."}`],
     [0,`${o.mascot} come in at ${o.w} and ${o.l}. ${o.ovr>teamOvr()?"On paper they're the better team.":"The ${me.mascot} should be favored tonight."}`],
+    [0,{CLEAR:`Clear skies tonight. Perfect football weather.`,RAIN:`It's pouring out there. Ball security will be huge.`,SNOW:`Snow is coming down! This is a classic.`,WIND:`Swirling winds tonight. Tough day to throw it deep.`}[G.wx]],
     [1,pick([`Win the turnover battle and you win this game. Simple as that.`,`The weather's perfect and the crowd is rocking. Let's play some football.`,`Watch the flags tonight, this officiating crew calls it tight.`])]]}
 
 // ================= Field play =================
 const YD=()=>Math.min(W/53.3,H/34);
-let cam=0, plays=['SLANTS','DEEP','SCREEN','RUN'], callIdx=0, touch=null, aim=null, msg='', msgT=0;
+let cam=0, plays=['SLANTS','DEEP','SCREEN','PA BOMB','RUN','TOSS'], callIdx=0, touch=null, aim=null, msg='', msgT=0;
 function startDrive(los){G.poss='me';G.los=los;G.down=1;G.togo=10;G.drives++;preSnap()}
 function preSnap(){
   mode='field';G.play=null;G.flag=false;renderBug();hideOv();
@@ -338,8 +340,9 @@ function setupFormation(){
   const routes={SLANTS:[[[12,L],[20,L+6],[30,L+14]],[[41,L],[33,L+6],[22,L+14]],[[34,L],[34,L+8],[42,L+14]]],
     DEEP:[[[10,L],[10,L+28]],[[43,L],[43,L+28]],[[34,L],[34,L+12],[26,L+22]]],
     SCREEN:[[[10,L],[8,L-2],[8,L+20]],[[43,L],[40,L+10],[30,L+20]],[[34,L],[38,L+3],[44,L+18]]],
-    RUN:[[[10,L],[10,L+8]],[[43,L],[43,L+8]],[[34,L],[34,L+4]]]}[call];
-  const off=[{r:'QB',p:qb,x:26.6,y:L-5,sp:sp(qb.stars)},{r:'RB',p:rb,x:26.6,y:L-8,sp:sp(rb.stars)+.6,route:call==='SCREEN'?[[22,L-6],[16,L-4],[14,L+20]]:call==='RUN'?null:[[34,L-4],[40,L+3]]},
+    'PA BOMB':[[[10,L],[12,L+10],[18,L+38]],[[43,L],[41,L+10],[35,L+38]],[[34,L],[34,L+6],[30,L+10]]],
+    RUN:[[[10,L],[10,L+8]],[[43,L],[43,L+8]],[[34,L],[34,L+4]]],TOSS:[[[10,L],[10,L+8]],[[43,L],[43,L+8]],[[34,L],[38,L+3]]]}[call];
+  const off=[{r:'QB',p:qb,x:26.6,y:L-5,sp:sp(qb.stars)},{r:'RB',p:rb,x:26.6,y:L-8,sp:sp(rb.stars)+.6,route:call==='TOSS'?null:call==='SCREEN'?[[22,L-6],[16,L-4],[14,L+20]]:call==='RUN'?null:[[34,L-4],[40,L+3]]},
     {r:'WR',p:wr1,x:routes[0][0][0],y:L,sp:sp(wr1.stars),route:routes[0].slice(1)},{r:'WR',p:wr2,x:routes[1][0][0],y:L,sp:sp(wr2.stars),route:routes[1].slice(1)},{r:'TE',p:te,x:routes[2][0][0],y:L,sp:sp(te.stars)-.4,route:routes[2].slice(1)}];
   for(let i=0;i<4;i++)off.push({r:'OL',x:21+i*3.5+1.7,y:L-.8,sp:3,ol:true});
   const dsp=5.6+G.opp.ovr/40-S.def*0;
@@ -356,6 +359,8 @@ function snap(){
   // pre-snap penalties
   if(Math.random()<.06){const f=pick([['FALSE START','OFFENSE',-5,false],['OFFSIDE','DEFENSE',5,false],['ENCROACHMENT','DEFENSE',5,false]]);return penalty(...f)}
   G.play.state='live';
+  if(G.play.call==='TOSS'){const rb=G.play.off[1];rb.x=36;rb.y-=1;G.play.carrier=rb;G.play.state='run';G.play.delayRush=1}
+  if(G.play.call==='PA BOMB'){G.play.def.filter(d=>d.rush).forEach(d=>d.delay+=.6);G.play.def.filter(d=>d.man).forEach(d=>d.y-=2)}
   if(G.play.call==='RUN'){const rb=G.play.off[1];G.play.carrier=rb;G.play.state='run';rb.vy=1}
 }
 function penalty(name,on,yds,auto1st){
@@ -404,7 +409,7 @@ function stepPlay(dt){
     else{tx=26;ty=pl.startLos+14}
     const dx=tx-d.x,dy=ty-d.y,dd=Math.hypot(dx,dy);if(dd>.05){const s=d.sp*(c?1.02:.97);d.x+=dx/dd*Math.min(s*dt,dd);d.y+=dy/dd*Math.min(s*dt,dd)}
     if(c&&!pl.ball&&dd<.9&&pl.state!=='dead'){
-      const brk=(c.p?c.p.stars:2)*.05;if(!d.missed&&Math.random()<brk){d.missed=true;d.sp*=.5;msgSet('BROKEN TACKLE!');crowd()}else if(!d.missed)endPlay(c===qb&&!pl.thrown&&pl.call!=='RUN'?'sack':'tackle')}
+      const brk=(c.p?c.p.stars:2)*.05;if(!d.missed&&Math.random()<brk){d.missed=true;d.sp*=.5;msgSet('BROKEN TACKLE!');crowd()}else if(!d.missed)endPlay(c===qb&&!pl.thrown&&pl.call!=='RUN'&&pl.call!=='TOSS'?'sack':'tackle')}
   });
   // ball flight
   if(pl.ball){
@@ -428,20 +433,20 @@ function resolveCatch(){
 }
 function throwTo(wx,wy){
   const pl=G.play,qb=pl.qb;if(!pl||pl.thrown||pl.state!=='live')return;
-  pl.thrown=true;const d=Math.hypot(wx-qb.x,wy-qb.y);const acc=(6-P('QB').stars)*.35;
+  pl.thrown=true;const d=Math.hypot(wx-qb.x,wy-qb.y);const acc=(6-P('QB').stars)*.35+(G.wx==='CLEAR'?0:G.wx==='WIND'?1.2:.7);
   pl.ball={sx:qb.x,sy:qb.y,tx:wx+R(-acc,acc),ty:wy+R(-acc,acc),t:0,dur:clamp(d/24,.35,1.6),x:qb.x,y:qb.y,h:0};beep(880,.05);
 }
 async function endPlay(kind){
   const pl=G.play;if(!pl||pl.state==='dead')return;pl.state='dead';whistle();
   const c=pl.carrier, gained=kind==='inc'||kind==='int'?0:Math.round((c?c.y:pl.qb.y)-G.los);
-  G.clock-=R(5,12);
+  G.clock-=R(22,38);
   // late holding flag
   if((kind==='tackle'||kind==='td')&&gained>8&&Math.random()<.07){return penalty('HOLDING','OFFENSE',-10,false)}
   let line='';
   if(kind==='td'){G.my+=7;G.stats.td++;msgSet('TOUCHDOWN!');crowd();crowd();line=pick([`TOUCHDOWN ${ME().mascot.toUpperCase()}! ${c.p?c.p.name:'He'} takes it to the house!`,`He is GONE! Six points and the extra point is good.`,`Into the end zone! What a play!`]);await say(0,line);await say(1,pick([`That's why you recruit speed, Chip.`,`Perfect execution. Textbook.`,`The crowd is going absolutely bonkers.`]));$('cap').hidden=true;return oppDrive(25)}
   if(kind==='int'){G.stats.int++;msgSet('INTERCEPTED');await say(0,`Picked off! ${G.opp.mascot} ball.`);$('cap').hidden=true;return oppDrive(clamp(100-Math.round(pl.ball?pl.ball.ty:G.los+10),5,95))}
   const yd=kind==='inc'?0:gained;
-  if(kind==='inc'){msgSet('INCOMPLETE')}else if(kind==='sack'){msgSet('SACKED '+yd);}else{msgSet((yd>=0?'+':'')+yd+' YDS');if(pl.call==='RUN')G.stats.rush+=yd}
+  if(kind==='inc'){msgSet('INCOMPLETE')}else if(kind==='sack'){msgSet('SACKED '+yd);}else{msgSet((yd>=0?'+':'')+yd+' YDS');if(pl.call==='RUN'||pl.call==='TOSS')G.stats.rush+=yd;else if(kind!=='sack')G.stats.pyd=(G.stats.pyd||0)+yd}
   if(Math.random()<.45){await say(Math.random()<.6?0:1,kind==='inc'?pick([`Incomplete. Ball hits the turf.`,`Broken up! Nice coverage.`]):kind==='sack'?pick([`Sacked! The pocket collapsed.`,`He held it too long.`]):yd>=15?pick([`Big gain! ${yd} yards on the play.`,`Explosive play from the ${ME().mascot}!`]):pick([`Gain of ${yd}.`,`Short pickup of ${yd}.`,`${c&&c.p?c.p.name:'Ball carrier'} brought down after ${yd}.`]));$('cap').hidden=true}
   G.los=clamp(G.los+yd,1,99);G.togo-=yd;
   if(G.togo<=0){G.down=1;G.togo=Math.min(10,100-G.los);msgSet('FIRST DOWN')}
@@ -453,7 +458,7 @@ async function punt(){$('ctl').hidden=true;const d=RI(36,48);await say(0,`They'l
 function fieldGoal(){
   const dist=100-G.los+17;$('ctl').hidden=true;mode='kick';kick={t:0,dist,done:false};
   $('ctl').hidden=false;$('ctl').innerHTML='<button id="kB">KICK!</button>';$('kB').onclick=async()=>{if(kick.done)return;kick.done=true;
-    const v=Math.abs(Math.sin(kick.t*2.4)),zone=.18+P('K').stars*.03-dist/400,good=v<zone;$('ctl').hidden=true;mode='field';
+    const v=Math.abs(Math.sin(kick.t*2.4)),zone=.18+P('K').stars*.03-dist/400-(G.wx==='WIND'?.04:0),good=v<zone;$('ctl').hidden=true;mode='field';
     if(good){G.my+=3;crowd();msgSet('FIELD GOAL GOOD');await say(0,`The ${dist} yarder is... GOOD!`)}else{msgSet('NO GOOD');await say(0,`${dist} yards... and it's wide! No good.`)}
     $('cap').hidden=true;oppDrive(good?25:100-G.los)}
 }
@@ -490,6 +495,7 @@ async function finishGame(){
   simWeek();
   S.roster.forEach(p=>{p.gpa=clamp(+(p.gpa+R(-.35,.25)+S.fac.acad*.05).toFixed(1),0,4)});
   if(G.label){return postResult(won)}
+  S.hs=S.hs||{td:0,yd:0,int:0};S.hs.td+=G.stats.td;S.hs.yd+=G.stats.pyd+G.stats.rush;S.hs.int+=G.stats.int;
   S.results[S.week]=(won?'W ':'L ')+G.my+'-'+G.th;S.week++;save();
   show(`<h1>${won?'VICTORY':'DEFEAT'}</h1><h2>${esc(scoreLine())}</h2><div class="card"><div class="row"><span>Passes caught</span><b>${G.stats.pass}</b></div><div class="row"><span>Rush yards</span><b>${G.stats.rush}</b></div><div class="row"><span>Touchdowns</span><b>${G.stats.td}</b></div><div class="row"><span>Interceptions</span><b>${G.stats.int}</b></div><div class="row"><span>Credits earned</span><b>+${earned}</b></div></div>
   ${S.roster.some(p=>p.gpa<2)?'<p style="color:var(--red)">Academic alert: a player fell below a 2.0 GPA. Send the team to Study Hall.</p>':''}<button data-a="hubBack">CONTINUE</button>`);
@@ -515,6 +521,7 @@ function postResult(won){
   show(`<h1>${won?(p.round===2?'NATIONAL CHAMPS!':'BOWL WIN!'):'SEASON OVER'}</h1><h2>${esc(scoreLine())}</h2><button data-a="offseason">OFFSEASON ▶</button>`);
 }
 ACT.offseason=()=>{
+  const hs=S.hs||{td:0,yd:0,int:0};if(hs.td>=28&&hs.int<=10&&!S.trophies.includes('Y'+S.season+' Golden Helmet'))S.trophies.push(`Y${S.season} Golden Helmet: ${P('QB').name}`),S.prestige=clamp(S.prestige+8,0,100);S.hs={td:0,yd:0,int:0};
   const grads=S.roster.filter(p=>p.yr>=3);S.roster=S.roster.filter(p=>p.yr<3);S.roster.forEach(p=>{p.yr++;if(Math.random()<.5)p.stars=Math.min(5,p.stars+1)});
   POS.forEach(pos=>{if(!S.roster.some(p=>p.pos===pos))S.roster.push(mkPlayer(pos,RI(1,2),0))});
   S.season++;S.week=0;S.results=[];S.credits+=4;S.post=null;TEAMS.forEach(t=>{t.w=t.l=t.cw=t.cl=t.pts=0;t.ovr=clamp(t.ovr+RI(-4,4),58,92)});
@@ -565,9 +572,10 @@ function drawField(dt){
     if(aim&&touch&&!pl.thrown){const [qx,qy]=toScreen(pl.qb.x,pl.qb.y);ctx.strokeStyle='#ffd400';ctx.lineWidth=2;ctx.setLineDash([6,5]);ctx.beginPath();ctx.moveTo(qx,qy);ctx.lineTo(touch.x,touch.y);ctx.stroke();ctx.setLineDash([]);ctx.beginPath();ctx.arc(touch.x,touch.y,y,0,7);ctx.stroke()}
   }
   if(flagAnim){flagAnim.t+=dt;const [,sy]=toScreen(0,flagAnim.x+2);const k=Math.min(1,flagAnim.t*1.5),sx=W*.15+k*W*.4,hh=Math.sin(k*Math.PI)*80;ctx.fillStyle='#ffd400';ctx.save();ctx.translate(sx,sy-hh);ctx.rotate(flagAnim.t*8*(1-k));ctx.fillRect(-7,-7,14,14);ctx.restore();if(flagAnim.t>3)flagAnim=null}
+  if(G.wx==='RAIN'||G.wx==='SNOW'){const n=G.wx==='RAIN'?90:60,t=performance.now()/1000;ctx.fillStyle=G.wx==='RAIN'?'#9fc4ff99':'#ffffffcc';for(let i=0;i<n;i++){const x=(i*97+t*(G.wx==='RAIN'?40:15)*(i%3+1))%W,yy=(i*53+t*(G.wx==='RAIN'?600:80))%H;G.wx==='RAIN'?ctx.fillRect(x,yy,1,9):ctx.fillRect(x,yy,3,3)}}
   // instructions + messages
   ctx.textAlign='center';
-  if(pl&&pl.state==='live'&&!pl.thrown&&pl.call!=='RUN'){ctx.fillStyle='#fff';ctx.font='bold 14px Oswald,sans-serif';ctx.fillText('TAP OR DRAG-RELEASE WHERE TO THROW',W/2,H*.18)}
+  if(pl&&pl.state==='live'&&!pl.thrown&&pl.call!=='RUN'&&pl.call!=='TOSS'){ctx.fillStyle='#fff';ctx.font='bold 14px Oswald,sans-serif';ctx.fillText('TAP OR DRAG-RELEASE WHERE TO THROW',W/2,H*.18)}
   if(pl&&pl.carrier&&pl.state==='run'){ctx.fillStyle='#fffc';ctx.font='bold 13px Oswald,sans-serif';ctx.fillText('HOLD & DRAG TO STEER THE RUNNER',W/2,H*.18)}
   if(pl&&pl.state==='pre'){ctx.fillStyle='#fff';ctx.font='bold 14px Oswald,sans-serif';ctx.fillText(`${ordinal(G.down)} & ${G.los+G.togo>=100?'GOAL':G.togo} at the ${G.los<=50?'own '+G.los:'opp '+(100-G.los)}`,W/2,H*.18)}
   if(msgT>0){msgT-=dt;ctx.font=`bold ${Math.round(Math.min(W/12,40))}px "Press Start 2P",monospace`;ctx.fillStyle='#000';ctx.fillText(msg,W/2+3,H*.36+3);ctx.fillStyle=/FLAG/.test(msg)?'#ffd400':'#ffc83d';ctx.fillText(msg,W/2,H*.36)}
